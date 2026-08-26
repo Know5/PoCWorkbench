@@ -1,0 +1,16 @@
+# 构建产物
+*.exe
+frontend/dist/
+build/
+
+# 前端依赖
+frontend/node_modules/
+
+# 运行时产物
+*.log
+*.db
+*.db-wal
+*.db-shm
+
+# 本地草稿
+新建 文本文档.txt
