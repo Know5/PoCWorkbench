@@ -69,8 +69,7 @@ build.bat v1.0.1   # 指定版本号（注入到设置页展示）
 │  ├─ exprfn/            # 表达式函数注册表（校验与引擎共用，保证同构）
 │  ├─ store/             # SQLite 持久层（WAL、FTS、事务）
 │  └─ model/             # 数据模型
-├─ frontend/             # React + Vite + Tailwind
-└─ 方案规划.md            # 架构设计文档
+└─ frontend/             # React + Vite + Tailwind
 ```
 
 ## 免责声明

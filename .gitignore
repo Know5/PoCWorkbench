@@ -12,5 +12,8 @@ frontend/node_modules/
 *.db-wal
 *.db-shm
 
+# 内部设计文档（不入库）
+方案规划.md
+
 # 本地草稿
 新建 文本文档.txt
