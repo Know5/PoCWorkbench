@@ -9,9 +9,8 @@ echo [1/3] 构建前端...
 pushd frontend
 call npm run build || goto :fail
 popd
-
-echo [2/3] 构建 Go（必须带 desktop,production 标签，否则启动报构建标签错误）...
-go build -tags desktop,production -trimpath -ldflags "-s -w -X pocworkbench/app.Version=%VERSION%" -o PoCWorkbench.exe . || goto :fail
+echo [2/3] 构建 Go（desktop,production 标签 + windowsgui 子系统，缺一不可）...
+go build -tags desktop,production -trimpath -ldflags "-s -w -H windowsgui -X pocworkbench/app.Version=%VERSION%" -o PoCWorkbench.exe . || goto :fail
 
 echo [3/3] 完成: PoCWorkbench.exe  版本 %VERSION%
 exit /b 0
