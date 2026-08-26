@@ -39,6 +39,47 @@ expression: base() && delay5()
 - 启动失败持久横幅（数据库锁、磁盘异常等不再静默）
 - 测试日志自动脱敏：`password/token/secret/api_key` 值替换为 `***`
 
+## 快速上手（开箱即用）
+
+1. **下载**：到 [Releases](https://github.com/Know5/PoCWorkbench/releases) 下载 `PoCWorkbench.exe`，双击运行。无需安装、无外部依赖（系统需 WebView2，Win11 内置，Win10 一般已有；打不开见下方 FAQ）
+2. **加 PoC**（首次启动为空库，二选一）：
+   - **导入 xray 模板**：新增 PoC → 粘贴 xray YAML → 自动转换为 PWF 格式（不认识的字段会列进警告，不静默丢弃）→ 保存
+   - **手动创建**：新增 PoC → 选 HTTP/TCP 传输 → 填请求与判定表达式 → 保存（每步实时编译校验）
+3. **验证测试**：PoC 列表 → 验证测试 → 填目标（HTTP 型 `http://host`，TCP 型 `host:port`，每行一个可批量）→ 需要抓包调试就填代理 → **勾选测试授权** → 开始
+4. **看结果**：实时日志 + 逐目标结果表，命中/未命中/超时/错误分类清晰；结果自动落库，PoC 详情页可查历史
+
+### 代理配置
+
+| PoC 类型 | 填法 | 说明 |
+|---|---|---|
+| HTTP | `http://127.0.0.1:8080`、`socks5://...` | 挂 Burp 调试；留空直连 |
+| TCP | `http://127.0.0.1:8080`（CONNECT 隧道）、`socks5://...` | 同样支持 Burp；非法地址会**显式报错**，不会静默直连 |
+
+### 时间盲注怎么写
+
+双规则"基线对照 + 阈值"，单规则 `status==200` 对时间盲注没有验证力：
+
+```yaml
+transport: http
+rules:
+    base:
+        request: {method: GET, path: /index.php?id=1}
+        expression: response.status == 200 && response.elapsed_ms < 3000   # 正常请求应当快
+    delay5:
+        request: {method: GET, path: "/index.php?id=1 AND IF(1,SLEEP(5),0)"}
+        expression: response.elapsed_ms >= 4000   # 注入后延迟真实发生才算命中
+expression: base() && delay5()
+```
+
+`elapsed_ms` 是该规则请求的真实网络耗时（毫秒）。阈值经验：注入 `SLEEP(N)` → 阈值取 `(N-1)*1000`；网络抖动大就加大 N 拉开间距。
+
+### FAQ
+
+- **双击没反应 / 提示 WebView2**：安装 [WebView2 Evergreen Runtime](https://developer.microsoft.com/microsoft-edge/webview2/)（一次性，Win11 一般自带）
+- **搜索时弹错误**：搜索词触发了 FTS 语法问题，换个关键词即可，列表数据不受影响
+- **数据在哪**：`%APPDATA%\PoCWorkbench\pocwb.db`；换机迁移：设置 → 备份数据库，把文件放到新机同路径
+- **杀软报毒**：未签名 Go 程序的常见误报，添加信任即可
+
 ## 安全属性
 
 - 无外部进程调用：引擎能力面仅 HTTP/TCP 收发 + 布尔判断
