@@ -668,12 +668,31 @@ function VendorInput({ draft, set, inputCls, borderStyle }: {
 }) {
   const [sugs, setSugs] = useState<string[]>([]);
   const [focused, setFocused] = useState(false);
+  // 键盘高亮项：↑↓ 移动 / Enter 选中 / Esc 收起
+  const [active, setActive] = useState(-1);
 
   useEffect(() => {
     let alive = true;
-    api.suggestVendor(draft.vendor).then((s) => { if (alive) setSugs(s ?? []); }).catch(() => {});
+    api.suggestVendor(draft.vendor).then((s) => { if (alive) { setSugs(s ?? []); setActive(-1); } }).catch(() => {});
     return () => { alive = false; };
   }, [draft.vendor]);
+
+  const pick = (s: string) => {
+    set({ vendor: s });
+    setSugs([]);
+    setActive(-1);
+  };
+
+  const onKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    const open = focused && draft.vendor.length > 0 && sugs.length > 0;
+    if (!open) return;
+    if (e.key === "ArrowDown") { e.preventDefault(); setActive((a) => Math.min(sugs.length - 1, a + 1)); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); setActive((a) => Math.max(-1, a - 1)); }
+    else if (e.key === "Enter" && active >= 0) { e.preventDefault(); pick(sugs[active]); }
+    else if (e.key === "Escape") { setSugs([]); setActive(-1); }
+  };
+
+  const open = focused && draft.vendor.length > 0 && sugs.length > 0;
 
   return (
     <label className="relative block text-xs">
@@ -683,16 +702,25 @@ function VendorInput({ draft, set, inputCls, borderStyle }: {
         onChange={(e) => set({ vendor: e.target.value })}
         onFocus={() => setFocused(true)}
         onBlur={() => setTimeout(() => setFocused(false), 150)}
+        onKeyDown={onKeyDown}
+        role="combobox"
+        aria-expanded={open}
+        aria-autocomplete="list"
         placeholder="输入以检索字典"
         className={`${inputCls}`}
         style={borderStyle}
       />
-      {focused && draft.vendor.length > 0 && sugs.length > 0 && (
-        <div className="absolute z-20 mt-1 max-h-36 w-full overflow-auto rounded-lg border shadow-xl"
+      {open && (
+        <div role="listbox" aria-label="厂商建议"
+          className="absolute z-20 mt-1 max-h-36 w-full overflow-auto rounded-lg border shadow-xl"
           style={{ borderColor: "var(--line-strong)", background: "var(--bg-panel)" }}>
-          {sugs.map((s) => (
-            <button key={s} type="button" onMouseDown={() => set({ vendor: s })}
-              className="block w-full px-3 py-1.5 text-left text-xs text-[var(--txt)] hover:bg-[var(--hover)]">
+          {sugs.map((s, i) => (
+            <button key={s} type="button" role="option" aria-selected={i === active}
+              onMouseDown={() => pick(s)}
+              onMouseEnter={() => setActive(i)}
+              className={`block w-full px-3 py-1.5 text-left text-xs text-[var(--txt)] transition-colors duration-150 ${
+                i === active ? "bg-[var(--hover)]" : ""
+              }`}>
               {s}
             </button>
           ))}

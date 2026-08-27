@@ -81,6 +81,7 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
             ref={searchRef}
             value={queryInput}
             onChange={(e) => setQueryInput(e.target.value)}
+            aria-label="搜索名称 / CVE / 标签 / 描述"
             placeholder="搜索名称 / CVE / 标签 / 描述…"
             className="h-[30px] w-full rounded-md border bg-transparent pl-8 pr-12 text-[13px] outline-none transition-colors duration-150 placeholder:text-[var(--txt-faint)] focus:border-[var(--accent-dim)]"
             style={borderStyle}
@@ -88,15 +89,15 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
           <kbd className="absolute right-2.5 top-1/2 -translate-y-1/2 font-mono-data text-[10px] text-[var(--txt-faint)]">Ctrl K</kbd>
         </div>
 
-        <select value={severity} onChange={(e) => { setSeverity(e.target.value); setPage(1); }} className={selectCls} style={borderStyle}>
+        <select value={severity} onChange={(e) => { setSeverity(e.target.value); setPage(1); }} aria-label="按严重度筛选" className={selectCls} style={borderStyle}>
           <option value="">严重度</option>
           {SEVERITIES.map((s) => <option key={s}>{s}</option>)}
         </select>
-        <select value={category} onChange={(e) => { setCategory(e.target.value); setPage(1); }} className={selectCls} style={borderStyle}>
+        <select value={category} onChange={(e) => { setCategory(e.target.value); setPage(1); }} aria-label="按类别筛选" className={selectCls} style={borderStyle}>
           <option value="">类别</option>
           {CATEGORIES.map((s) => <option key={s}>{s}</option>)}
         </select>
-        <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} className={selectCls} style={borderStyle}>
+        <select value={status} onChange={(e) => { setStatus(e.target.value); setPage(1); }} aria-label="按状态筛选" className={selectCls} style={borderStyle}>
           <option value="">状态</option>
           {STATUSES.map((s) => <option key={s}>{s}</option>)}
           <option value="archived">已归档</option>
