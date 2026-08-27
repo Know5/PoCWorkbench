@@ -2,6 +2,10 @@
 @import "@fontsource/jetbrains-mono/400.css";
 @import "@fontsource/jetbrains-mono/500.css";
 
+/* dark: 变体跟随 data-theme 属性而非系统媒体查询——
+   主题切换由 theme.ts 写 documentElement.dataset.theme，手动选浅色时不得再被系统深色劫持 */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 /* ── 设计令牌：macOS 风 · 昼夜双主题 ──────────────────── */
 :root,
 [data-theme="light"] {
