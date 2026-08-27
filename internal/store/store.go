@@ -157,28 +157,30 @@ func (s *Store) InsertPoc(uid string, d *model.Draft, canonicalSpec string) (boo
 	hash := pwf.CanonicalHash(canonicalSpec)
 	now := nowRFC3339()
 
+	// 去重预检、字典创建、主行与 FTS 写入同一事务：
+	// 此前预检/字典在事务外，并发撞车走不到友好重复路径，PoC 回滚还会残留垃圾字典行
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
 	var exists int
-	if err := s.db.QueryRow(`SELECT COUNT(1) FROM poc WHERE spec_sha256 = ?`, hash).Scan(&exists); err != nil {
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM poc WHERE spec_sha256 = ?`, hash).Scan(&exists); err != nil {
 		return false, err
 	}
 	if exists > 0 {
 		return false, nil
 	}
 
-	vendorID, err := s.ensureVendor(d.Vendor)
+	vendorID, err := ensureVendor(tx, d.Vendor)
 	if err != nil {
 		return false, err
 	}
-	productID, err := s.ensureProduct(vendorID, d.Product)
+	productID, err := ensureProduct(tx, vendorID, d.Product)
 	if err != nil {
 		return false, err
 	}
-
-	tx, err := s.db.Begin()
-	if err != nil {
-		return false, err
-	}
-	defer tx.Rollback()
 
 	_, err = tx.Exec(`INSERT INTO poc
 		(uid,name,aliases,severity,category,vendor_id,product_id,tags,description,cve,status,source,spec_kind,spec,spec_sha256,created_at,updated_at)
@@ -216,13 +218,20 @@ func nullIfEmpty(s string) any {
 	return s
 }
 
-func vendorNameOf(q queryable, id int64) string {
+// dbtx 抽象单连接/事务：确保字典创建等辅助写操作能纳入调用方的事务边界。
+type dbtx interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+func vendorNameOf(q dbtx, id int64) string {
 	var name string
 	_ = q.QueryRow(`SELECT canonical_name FROM vendor WHERE id=?`, id).Scan(&name)
 	return name
 }
 
-func productNameOf(q queryable, id int64) string {
+func productNameOf(q dbtx, id int64) string {
 	if id == 0 {
 		return ""
 	}
@@ -231,18 +240,14 @@ func productNameOf(q queryable, id int64) string {
 	return name
 }
 
-type queryable interface {
-	QueryRow(query string, args ...any) *sql.Row
-}
-
 // ---- 字典 ----
 
-func (s *Store) ensureVendor(name string) (int64, error) {
+func ensureVendor(q dbtx, name string) (int64, error) {
 	if name == "" {
 		return 0, nil
 	}
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM vendor WHERE canonical_name=?`, name).Scan(&id)
+	err := q.QueryRow(`SELECT id FROM vendor WHERE canonical_name=?`, name).Scan(&id)
 	switch err {
 	case nil:
 		return id, nil
@@ -250,7 +255,7 @@ func (s *Store) ensureVendor(name string) (int64, error) {
 		// canonical 未命中——查别名。aliases 存 JSON 数组文本，
 		// 用带引号的完整元素精确匹配（escapeLike 防通配符注入），子串命中不算。
 		pat := `%"` + escapeLike(name) + `"%`
-		rows, e := s.db.Query(`SELECT id FROM vendor WHERE aliases LIKE ? ESCAPE '\'`, pat)
+		rows, e := q.Query(`SELECT id FROM vendor WHERE aliases LIKE ? ESCAPE '\'`, pat)
 		if e == nil {
 			defer rows.Close()
 			for rows.Next() {
@@ -262,10 +267,10 @@ func (s *Store) ensureVendor(name string) (int64, error) {
 	default:
 		return 0, err
 	}
-	res, err := s.db.Exec(`INSERT INTO vendor(canonical_name,aliases,created_at) VALUES(?,'[]',?)`, name, nowRFC3339())
+	res, err := q.Exec(`INSERT INTO vendor(canonical_name,aliases,created_at) VALUES(?,'[]',?)`, name, nowRFC3339())
 	if err != nil {
 		existing := int64(0)
-		e2 := s.db.QueryRow(`SELECT id FROM vendor WHERE canonical_name=?`, name).Scan(&existing)
+		e2 := q.QueryRow(`SELECT id FROM vendor WHERE canonical_name=?`, name).Scan(&existing)
 		if e2 == nil {
 			return existing, nil
 		}
@@ -274,19 +279,19 @@ func (s *Store) ensureVendor(name string) (int64, error) {
 	return res.LastInsertId()
 }
 
-func (s *Store) ensureProduct(vendorID int64, name string) (int64, error) {
+func ensureProduct(q dbtx, vendorID int64, name string) (int64, error) {
 	if name == "" || vendorID == 0 {
 		return 0, nil
 	}
 	var id int64
-	err := s.db.QueryRow(`SELECT id FROM product WHERE vendor_id=? AND canonical_name=?`, vendorID, name).Scan(&id)
+	err := q.QueryRow(`SELECT id FROM product WHERE vendor_id=? AND canonical_name=?`, vendorID, name).Scan(&id)
 	if err == nil {
 		return id, nil
 	}
-	res, err := s.db.Exec(`INSERT INTO product(vendor_id,canonical_name,aliases) VALUES(?,?,'[]')`, vendorID, name)
+	res, err := q.Exec(`INSERT INTO product(vendor_id,canonical_name,aliases) VALUES(?,?,'[]')`, vendorID, name)
 	if err != nil {
 		existing := int64(0)
-		e2 := s.db.QueryRow(`SELECT id FROM product WHERE vendor_id=? AND canonical_name=?`, vendorID, name).Scan(&existing)
+		e2 := q.QueryRow(`SELECT id FROM product WHERE vendor_id=? AND canonical_name=?`, vendorID, name).Scan(&existing)
 		if e2 == nil {
 			return existing, nil
 		}
@@ -376,42 +381,74 @@ func (s *Store) MergeVendorAlias(canonical, alias string) error {
 	if _, e := tx.Exec(`UPDATE vendor SET aliases=? WHERE id=?`, mustJSON(list), canonID); e != nil {
 		return e
 	}
-	if err := tx.Commit(); err != nil {
+
+	// 同事务刷新受影响行的 FTS（vendor 迁移后其 poc 的 vendor 列需同步）。
+	// 此前提交后独立跑 refreshFtsAll：失败会造成主表与 FTS 永久失配且无补偿
+	rows, e := tx.Query(`SELECT p.uid, IFNULL(pr.canonical_name,'') FROM poc p
+		LEFT JOIN product pr ON p.product_id=pr.id WHERE p.vendor_id=?`, canonID)
+	if e != nil {
+		return e
+	}
+	type uidProduct struct{ uid, product string }
+	var affected []uidProduct
+	for rows.Next() {
+		var r uidProduct
+		if err := rows.Scan(&r.uid, &r.product); err != nil {
+			rows.Close()
+			return err
+		}
+		affected = append(affected, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
 		return err
 	}
-	return s.refreshFtsAll()
+	for _, r := range affected {
+		if _, e := tx.Exec(`UPDATE poc_fts SET vendor=?, product=? WHERE uid=?`, canonical, r.product, r.uid); e != nil {
+			return e
+		}
+	}
+	return tx.Commit()
 }
 
-// UpdateSpec 更新模板体（已通过三关校验的规范化 YAML）。
+// UpdateSpec 更新内容体（已校验的规范化 YAML 或脚本原文）。
+// 去重预检与写入同事务，杜绝并发下预检通过、唯一约束兜底的 TOCTOU 窗口。
 func (s *Store) UpdateSpec(uid, canonicalSpec string) error {
 	hash := pwf.CanonicalHash(canonicalSpec)
-	var n int
-	if err := s.db.QueryRow(`SELECT COUNT(1) FROM poc WHERE spec_sha256=? AND uid!=?`, hash, uid).Scan(&n); err != nil {
-		return err
-	}
-	if n > 0 {
-		return fmt.Errorf("内容重复：相同 spec 已存在")
-	}
-	_, err := s.db.Exec(`UPDATE poc SET spec=?, spec_sha256=?, updated_at=? WHERE uid=?`,
-		canonicalSpec, hash, nowRFC3339(), uid)
-	return err
-}
-
-// SetPocVendorProduct 直接指派 PoC 的厂商/产品（UNKNOWN 治理）。
-func (s *Store) SetPocVendorProduct(uid string, vendorName, productName string) error {
-	vendorID, err := s.ensureVendor(vendorName)
-	if err != nil {
-		return err
-	}
-	productID, err := s.ensureProduct(vendorID, productName)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var n int
+	if err := tx.QueryRow(`SELECT COUNT(1) FROM poc WHERE spec_sha256=? AND uid!=?`, hash, uid).Scan(&n); err != nil {
+		return err
+	}
+	if n > 0 {
+		return fmt.Errorf("内容重复：相同 spec 已存在")
+	}
+	if _, err := tx.Exec(`UPDATE poc SET spec=?, spec_sha256=?, updated_at=? WHERE uid=?`,
+		canonicalSpec, hash, nowRFC3339(), uid); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// SetPocVendorProduct 直接指派 PoC 的厂商/产品（UNKNOWN 治理）。
+func (s *Store) SetPocVendorProduct(uid string, vendorName, productName string) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	vendorID, err := ensureVendor(tx, vendorName)
+	if err != nil {
+		return err
+	}
+	productID, err := ensureProduct(tx, vendorID, productName)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE poc SET vendor_id=?, product_id=?, updated_at=? WHERE uid=?`,
 		vendorID, productID, nowRFC3339(), uid); err != nil {
 		return err
@@ -424,47 +461,7 @@ func (s *Store) SetPocVendorProduct(uid string, vendorName, productName string) 
 	return tx.Commit()
 }
 
-// refreshFtsAll / refreshFtsOne —— 字典变更后的 FTS 刷新（架构评审 F-5 落地）。
-func (s *Store) refreshFtsAll() error {
-	type vp struct{ uid, vendor, product string }
-	var all []vp
-	rows, err := s.db.Query(`SELECT p.uid, v.canonical_name, IFNULL(pr.canonical_name,'')
-		FROM poc p LEFT JOIN vendor v ON p.vendor_id=v.id LEFT JOIN product pr ON p.product_id=pr.id`)
-	if err != nil {
-		return err
-	}
-	for rows.Next() {
-		var r vp
-		if err := rows.Scan(&r.uid, &r.vendor, &r.product); err != nil {
-			rows.Close()
-			return err
-		}
-		all = append(all, r)
-	}
-	rows.Close()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	for _, r := range all {
-		if _, e := tx.Exec(`UPDATE poc_fts SET vendor=?, product=? WHERE uid=?`, r.vendor, r.product, r.uid); e != nil {
-			return e
-		}
-	}
-	return tx.Commit()
-}
-
-func (s *Store) refreshFtsOne(uid string) error {
-	var vendorID, productID sql.NullInt64
-	if err := s.db.QueryRow(`SELECT vendor_id, product_id FROM poc WHERE uid=?`, uid).Scan(&vendorID, &productID); err != nil {
-		return err
-	}
-	vendor := vendorNameOf(s.db, vendorID.Int64)
-	product := productNameOf(s.db, productID.Int64)
-	_, err := s.db.Exec(`UPDATE poc_fts SET vendor=?, product=? WHERE uid=?`, vendor, product, uid)
-	return err
-}
+// refreshFtsAll / refreshFtsOne 已删除：FTS 刷新统一内联进各写路径的事务（字典变更见 MergeVendorAlias）。
 
 // ---- 查询 ----
 
@@ -797,19 +794,19 @@ func (s *Store) KindOf(uid string) (string, error) {
 
 // UpdateMeta 更新元数据字段并同步 FTS。
 func (s *Store) UpdateMeta(uid string, d *model.Draft) error {
-	vendorID, err := s.ensureVendor(d.Vendor)
-	if err != nil {
-		return err
-	}
-	productID, err := s.ensureProduct(vendorID, d.Product)
-	if err != nil {
-		return err
-	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	vendorID, err := ensureVendor(tx, d.Vendor)
+	if err != nil {
+		return err
+	}
+	productID, err := ensureProduct(tx, vendorID, d.Product)
+	if err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE poc SET name=?,aliases=?,severity=?,category=?,vendor_id=?,product_id=?,
 		tags=?,description=?,cve=?,status=?,updated_at=? WHERE uid=?`,
 		d.Name, mustJSON(d.Aliases), d.Severity, d.Category, vendorID, productID,

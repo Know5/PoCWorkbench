@@ -162,7 +162,7 @@ func TestDictMergeRefreshesFts(t *testing.T) {
 	d.Vendor = "xwiki"
 	mustInsert(t, s, "uid-1", d, specA)
 
-	if _, err := s.ensureVendor("XWiki"); err != nil {
+	if _, err := ensureVendor(s.db, "XWiki"); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.MergeVendorAlias("XWiki", "xwiki"); err != nil {
@@ -438,12 +438,12 @@ func TestEnsureVendorAliasResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	idXWiki, err := s.ensureVendor("XWiki")
+	idXWiki, err := ensureVendor(s.db, "XWiki")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// 别名精确命中：返回既有厂商，不新建
-	idAlias, err := s.ensureVendor("xwiki")
+	idAlias, err := ensureVendor(s.db, "xwiki")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -451,7 +451,7 @@ func TestEnsureVendorAliasResolution(t *testing.T) {
 		t.Fatalf("别名 xwiki 应命中 XWiki(id=%d)，got=%d", idXWiki, idAlias)
 	}
 	// 子串不得误命中："Wiki" 是 "XWiki" 的子串，但不是完整别名 → 应新建
-	idSub, err := s.ensureVendor("Wiki")
+	idSub, err := ensureVendor(s.db, "Wiki")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +459,7 @@ func TestEnsureVendorAliasResolution(t *testing.T) {
 		t.Fatal("子串 Wiki 不应误命中别名 XWiki")
 	}
 	// 通配符不得透传："_%Wiki" 里的 % 是字面量，不应匹配任何别名 → 新建
-	idWild, err := s.ensureVendor("%XWiki")
+	idWild, err := ensureVendor(s.db, "%XWiki")
 	if err != nil {
 		t.Fatal(err)
 	}
