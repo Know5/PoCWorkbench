@@ -2,12 +2,12 @@
 
 桌面端 PoC 管理与验证工作台。把散落的 xray 模板、手写 PoC 收进一个带全文检索的本地库，用自研引擎对授权目标做安全验证——单文件 Windows 应用，开箱即用。
 
-> 当前版本：v1.0.4
+> 当前版本：v1.1.0
 
 ## 功能特性
 
 ### PoC 库管理
-- **xray 模板导入**：粘贴 YAML 自动转换为 PWF 格式，冷门字段（set/output 等）不静默丢弃，逐条进警告列表
+- **xray / Nuclei 模板导入**：粘贴 YAML 自动识别格式并转换为 PWF；不支持的特性（xray set/output、Nuclei dsl/interactsh 等）不静默丢弃，逐条进警告列表
 - **三关校验**：严格 schema → 表达式编译 → 总表达式 rule 引用检查，坏 PoC 进不了库
 - **全文检索**：SQLite FTS trigram（中文 ≥3 字词）+ LIKE 回退（短词），按名称/CVE/标签/描述/厂商检索
 - **厂商/产品字典治理**：别名归并、输入时自动补全（包含匹配、不分大小写）、PoC 一键指派
@@ -43,7 +43,7 @@ expression: base() && delay5()
 
 1. **下载**：到 [Releases](https://github.com/Know5/PoCWorkbench/releases) 下载 `PoCWorkbench.exe`，双击运行。无需安装、无外部依赖（系统需 WebView2，Win11 内置，Win10 一般已有；打不开见下方 FAQ）
 2. **加 PoC**（首次启动为空库，二选一）：
-   - **导入 xray 模板**：新增 PoC → 粘贴 xray YAML → 自动转换为 PWF 格式（不认识的字段会列进警告，不静默丢弃）→ 保存
+   - **导入模板**：新增 PoC → 粘贴 Xray 或 Nuclei YAML（自动识别格式）→ 转换为 PWF（不支持的字段列进警告，不静默丢弃）→ 保存
    - **手动创建**：新增 PoC → 选 HTTP/TCP 传输 → 填请求与判定表达式 → 保存（每步实时编译校验）
 3. **验证测试**：PoC 列表 → 验证测试 → 填目标（HTTP 型 `http://host`，TCP 型 `host:port`，每行一个可批量）→ 需要抓包调试就填代理 → **勾选测试授权** → 开始
 4. **看结果**：实时日志 + 逐目标结果表，命中/未命中/超时/错误分类清晰；结果自动落库，PoC 详情页可查历史
