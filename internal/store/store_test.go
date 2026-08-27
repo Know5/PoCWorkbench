@@ -92,7 +92,7 @@ func TestSearchFTSAndLike(t *testing.T) {
 	mustInsert(t, s, "uid-2", d2, specB)
 
 	// FTS：≥3 字符中文词
-	uids, err := s.searchUIDs("未授权")
+	uids, err := s.searchUIDs("未授权", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +100,7 @@ func TestSearchFTSAndLike(t *testing.T) {
 		t.Errorf("FTS 中文检索失败: %v", uids)
 	}
 	// LIKE 回退：2 字符词
-	uids, err = s.searchUIDs("授权")
+	uids, err = s.searchUIDs("授权", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +108,7 @@ func TestSearchFTSAndLike(t *testing.T) {
 		t.Errorf("LIKE 回退失败: %v", uids)
 	}
 	// 多词 AND
-	uids, err = s.searchUIDs("rsync 未授权")
+	uids, err = s.searchUIDs("rsync 未授权", false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,6 +178,47 @@ func TestGetPocScriptRaw(t *testing.T) {
 	kind, err := s.KindOf("uid-script")
 	if err != nil || kind != "script" {
 		t.Fatalf("KindOf 异常: kind=%q err=%v", kind, err)
+	}
+}
+
+// 回归：归档视图此前恒为空（默认排除 archived 与 status='archived' 筛选冲突），恢复无从谈起。
+func TestArchivedViewVisible(t *testing.T) {
+	s := openTest(t)
+	mustInsert(t, s, "uid-1", draft("Poc A", specA), specA)
+	if err := s.SetStatus("uid-1", "archived"); err != nil {
+		t.Fatal(err)
+	}
+
+	// 默认视图不可见
+	_, total, _ := s.ListPocs(model.Filter{}, model.Page{Number: 1, Size: 10})
+	if total != 0 {
+		t.Fatalf("默认视图不应出现 archived: total=%d", total)
+	}
+	// 已归档筛选可见，且可搜索（短词 LIKE 分支也要包含）
+	items, total, err := s.ListPocs(model.Filter{Status: "archived"}, model.Page{Number: 1, Size: 10})
+	if err != nil || total != 1 || len(items) != 1 || items[0].UID != "uid-1" {
+		t.Fatalf("已归档视图应可见: items=%v total=%d err=%v", items, total, err)
+	}
+	items, _, err = s.ListPocs(model.Filter{Status: "archived", Query: "Poc A"}, model.Page{Number: 1, Size: 10})
+	if err != nil || len(items) != 1 {
+		t.Fatalf("已归档视图内检索失败: items=%v err=%v", items, err)
+	}
+	uids, err := s.searchUIDs("A", true)
+	if err != nil || len(uids) != 1 || uids[0] != "uid-1" {
+		t.Fatalf("includeArchived 的纯短词 LIKE 应命中: %v err=%v", uids, err)
+	}
+	uids, err = s.searchUIDs("A", false)
+	if err != nil || len(uids) != 0 {
+		t.Fatalf("不含 archived 的纯短词 LIKE 不应命中: %v err=%v", uids, err)
+	}
+
+	// 恢复后回到默认视图
+	if err := s.SetStatus("uid-1", "untested"); err != nil {
+		t.Fatal(err)
+	}
+	_, total, _ = s.ListPocs(model.Filter{}, model.Page{Number: 1, Size: 10})
+	if total != 1 {
+		t.Fatalf("恢复后默认视图应可见: total=%d", total)
 	}
 }
 

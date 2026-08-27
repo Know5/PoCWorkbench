@@ -535,7 +535,11 @@ func (s *Store) ListPocs(f model.Filter, pg model.Page) ([]model.Summary, int64,
 }
 
 func (s *Store) buildWhere(f model.Filter) (string, []any, error) {
-	conds := []string{` p.status != 'archived'`} // 默认过滤软删除
+	// 默认过滤软删除；显式筛选「已归档」时不加，否则该视图恒为空、恢复无从谈起
+	var conds []string
+	if f.Status != "archived" {
+		conds = append(conds, ` p.status != 'archived'`)
+	}
 	var args []any
 	add := func(cond string, a ...any) {
 		conds = append(conds, cond)
@@ -563,7 +567,7 @@ func (s *Store) buildWhere(f model.Filter) (string, []any, error) {
 		add(` p.cve = ?`, f.CVE)
 	}
 	if q := strings.TrimSpace(f.Query); q != "" {
-		uids, err := s.searchUIDs(q)
+		uids, err := s.searchUIDs(q, f.Status == "archived")
 		if err != nil {
 			return "", nil, fmt.Errorf("搜索失败: %w", err)
 		}
@@ -578,7 +582,8 @@ func (s *Store) buildWhere(f model.Filter) (string, []any, error) {
 }
 
 // searchUIDs 混合检索：≥3 字符词走 FTS trigram，<3 字符词 LIKE 回退，取交集。
-func (s *Store) searchUIDs(q string) ([]string, error) {
+// includeArchived 控制纯短词 LIKE 分支是否包含已归档行（与列表状态筛选保持一致）。
+func (s *Store) searchUIDs(q string, includeArchived bool) ([]string, error) {
 	tokens := strings.Fields(q)
 	var long, short []string
 	for _, t := range tokens {
@@ -643,8 +648,12 @@ func (s *Store) searchUIDs(q string) ([]string, error) {
 		return keys(candidates), nil
 	default:
 		// 纯短词：全表 LIKE 扫描（个人库规模毫秒级）
+		statusCond := `p.status!='archived'`
+		if includeArchived {
+			statusCond = `1=1`
+		}
 		pat := likePat(short[0])
-		rows, err := s.db.Query(`SELECT p.uid FROM poc p WHERE p.status!='archived'
+		rows, err := s.db.Query(`SELECT p.uid FROM poc p WHERE `+statusCond+`
 			AND (p.name LIKE ? ESCAPE '\' OR p.description LIKE ? ESCAPE '\' OR p.aliases LIKE ? ESCAPE '\' OR p.tags LIKE ? ESCAPE '\')`,
 			pat, pat, pat, pat)
 		if err != nil {
