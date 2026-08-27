@@ -704,27 +704,47 @@ func (s *Store) GetPoc(uid string) (*model.Pwf, error) {
 		&m.CreatedAt, &m.UpdatedAt, &last, &desc, &specYAML); err != nil {
 		return nil, err
 	}
+	build := func(spec *model.Spec, specRaw string) *model.Pwf {
+		aliases := unjsonStrings(aliasJSON)
+		tags := unjsonStrings(tagJSON)
+		p := &model.Pwf{
+			Metadata: model.Metadata{
+				UID: m.UID, Name: m.Name, Aliases: aliases, Severity: m.Severity,
+				Category: m.Category, Vendor: m.Vendor, Product: m.Product,
+				Tags: tags, Description: desc.String, CVE: cve.String,
+				Status: m.Status, Source: m.Source, Kind: m.Kind,
+				CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
+			},
+			SpecRaw: specRaw,
+		}
+		if spec != nil {
+			p.Spec = *spec
+		}
+		if last.Valid {
+			l := last.String
+			p.Metadata.LastTestedAt = &l
+		}
+		return p
+	}
+	// script 类内容不是 PWF spec，解析必然失败；原文经 SpecRaw 透传
+	if m.Kind == "script" {
+		return build(nil, specYAML), nil
+	}
 	spec, err := pwf.ParseSpec(specYAML)
 	if err != nil {
 		return nil, fmt.Errorf("spec 解析失败: %w", err)
 	}
-	aliases := unjsonStrings(aliasJSON)
-	tags := unjsonStrings(tagJSON)
-	p := &model.Pwf{
-		Metadata: model.Metadata{
-			UID: m.UID, Name: m.Name, Aliases: aliases, Severity: m.Severity,
-			Category: m.Category, Vendor: m.Vendor, Product: m.Product,
-			Tags: tags, Description: desc.String, CVE: cve.String,
-			Status: m.Status, Source: m.Source, Kind: m.Kind,
-			CreatedAt: m.CreatedAt, UpdatedAt: m.UpdatedAt,
-		},
-		Spec: *spec,
+	return build(spec, ""), nil
+}
+
+// KindOf 返回 PoC 的 spec_kind（template|script），供更新前分流校验。
+func (s *Store) KindOf(uid string) (string, error) {
+	var k string
+	err := s.db.QueryRow(`SELECT spec_kind FROM poc WHERE uid=?`, uid).Scan(&k)
+	if err == sql.ErrNoRows {
+		return "", fmt.Errorf("PoC 不存在")
 	}
-	if last.Valid {
-		l := last.String
-		p.Metadata.LastTestedAt = &l
-	}
-	return p, nil
+	return k, err
 }
 
 // UpdateMeta 更新元数据字段并同步 FTS。

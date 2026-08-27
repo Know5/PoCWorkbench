@@ -87,7 +87,7 @@ export interface PwfMetadata {
   kind: string; createdAt: string; updatedAt: string; lastTestedAt: string | null;
 }
 
-export interface Pwf { metadata: PwfMetadata; spec: PwfSpec }
+export interface Pwf { metadata: PwfMetadata; spec: PwfSpec; specRaw?: string }
 
 export interface TestRun {
   id: number; pocUid: string; target: string; targetHost: string;

@@ -106,7 +106,10 @@ export default function PocForm({ mode, uid, onNav }: {
           tags: p.metadata.tags ?? [], description: p.metadata.description,
           cve: p.metadata.cve, status: p.metadata.status, source: p.metadata.source,
           kind: p.metadata.kind,
-          specYaml: JSON.stringify(p.spec, null, 2),
+          // script 类内容不是 PWF spec，后端经 specRaw 透传原文；template 走解析后的结构体
+          specYaml: p.metadata.kind === "script"
+            ? (p.specRaw ?? "")
+            : JSON.stringify(p.spec, null, 2),
         });
         if (p.metadata.kind === "template") {
           const y = yamlDump(p.spec, { lineWidth: -1 });
@@ -185,7 +188,8 @@ export default function PocForm({ mode, uid, onNav }: {
         onNav({ page: "list" });
       } else if (uid) {
         await api.updatePocMeta(uid, d);
-        if (d.kind === "template") await api.updatePocSpec(uid, d.specYaml);
+        // template 与 script 都要落内容：后端按 kind 分流校验（此前 script 改动被静默丢弃）
+        await api.updatePocSpec(uid, d.specYaml);
         setSaved(true);
         setTimeout(() => setSaved(false), 2000);
       }

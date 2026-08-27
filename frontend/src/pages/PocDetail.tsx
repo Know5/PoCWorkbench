@@ -117,9 +117,11 @@ export default function PocDetail({ uid, onNav }: { uid: string; onNav: (r: Rout
       </div>
 
       <section>
-        <SectionTitle>PWF 模板</SectionTitle>
+        <SectionTitle>{m.kind === "script" ? "脚本内容" : "PWF 模板"}</SectionTitle>
         <CodeMirror
-          value={JSON.stringify(poc.spec, null, 2)}
+          value={m.kind === "script"
+            ? (poc.specRaw ?? "")
+            : JSON.stringify(poc.spec, null, 2)}
           extensions={[yaml()]}
           editable={false}
           theme={theme}

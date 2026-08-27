@@ -156,6 +156,31 @@ func TestDictMergeRefreshesFts(t *testing.T) {
 	}
 }
 
+// 回归：script 类内容不是合法 PWF spec，此前 GetPoc 无条件解析导致该类记录永久打不开。
+func TestGetPocScriptRaw(t *testing.T) {
+	s := openTest(t)
+	script := "#!/usr/bin/env python3\n# not a valid PWF spec: [unclosed\nprint('poc-check')"
+	d := draft("脚本 PoC", script)
+	d.Kind = "script"
+	d.Source = "manual"
+	mustInsert(t, s, "uid-script", d, script)
+
+	p, err := s.GetPoc("uid-script")
+	if err != nil {
+		t.Fatalf("script 类 GetPoc 不应失败: %v", err)
+	}
+	if p.SpecRaw != script {
+		t.Errorf("SpecRaw 应为存储原文: %q", p.SpecRaw)
+	}
+	if p.Spec.Transport != "" {
+		t.Errorf("script 类不应产出解析后的 spec: %+v", p.Spec)
+	}
+	kind, err := s.KindOf("uid-script")
+	if err != nil || kind != "script" {
+		t.Fatalf("KindOf 异常: kind=%q err=%v", kind, err)
+	}
+}
+
 func TestGetPocRoundTrip(t *testing.T) {
 	s := openTest(t)
 	mustInsert(t, s, "uid-1", draft("Poc A", specA), specA)

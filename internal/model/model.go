@@ -5,6 +5,8 @@ package model
 type Pwf struct {
 	Metadata Metadata `json:"metadata" yaml:"metadata"`
 	Spec     Spec     `json:"spec" yaml:"spec"`
+	// SpecRaw 存储原文：script 类为任意脚本内容，template 恒为空（内容走 Spec）。
+	SpecRaw string `json:"specRaw,omitempty" yaml:"specRaw,omitempty"`
 }
 
 // Metadata PWF 元数据块（存储列的内存形态）。

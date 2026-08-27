@@ -147,6 +147,9 @@ func (a *App) CreatePoc(d *model.Draft) (string, error) {
 		if strings_Blank(d.SpecYAML) {
 			return "", fmt.Errorf("脚本内容不能为空")
 		}
+		if len(d.SpecYAML) > 256<<10 {
+			return "", fmt.Errorf("脚本内容超过 256KB 上限")
+		}
 		d.Source = orDefaultStr(d.Source, "manual")
 	default:
 		d.Kind = "template"
@@ -176,14 +179,30 @@ func (a *App) CreatePoc(d *model.Draft) (string, error) {
 	return uid, nil
 }
 
-// UpdatePocSpec 更新模板体（重新过三关校验）。
+// UpdatePocSpec 更新内容体：template 过三关校验；script 仅限空与大小（不做 PWF 校验）。
 func (a *App) UpdatePocSpec(uid, specYAML string) error {
 	if err := a.requireStore(); err != nil {
 		return err
 	}
-	canonical, err := pwf.ValidateSpec(specYAML)
+	kind, err := a.store.KindOf(uid)
 	if err != nil {
 		return err
+	}
+	var canonical string
+	switch kind {
+	case "script":
+		if strings.TrimSpace(specYAML) == "" {
+			return fmt.Errorf("脚本内容不能为空")
+		}
+		if len(specYAML) > 256<<10 {
+			return fmt.Errorf("脚本内容超过 256KB 上限")
+		}
+		canonical = specYAML
+	default:
+		canonical, err = pwf.ValidateSpec(specYAML)
+		if err != nil {
+			return err
+		}
 	}
 	// 复用 Insert 的去重语义不可行（同 uid 更新），直接改列：
 	return a.store.UpdateSpec(uid, canonical)
@@ -404,7 +423,7 @@ func (a *App) GetTestRun(id int64) (*model.TestRun, error) {
 	return a.store.GetTestRun(id)
 }
 
-// ExportPoc 导出单个 PoC 的完整 PWF YAML（元数据 + spec）。
+// ExportPoc 导出单个 PoC 的完整 PWF YAML（元数据 + spec；script 类导出原文）。
 func (a *App) ExportPoc(uid string) (string, error) {
 	if err := a.requireStore(); err != nil {
 		return "", err
@@ -412,6 +431,16 @@ func (a *App) ExportPoc(uid string) (string, error) {
 	p, err := a.store.GetPoc(uid)
 	if err != nil {
 		return "", err
+	}
+	if p.Metadata.Kind == "script" {
+		out, err := yml.Marshal(struct {
+			Metadata *model.Metadata `yaml:"metadata"`
+			Script   string          `yaml:"script"`
+		}{&p.Metadata, p.SpecRaw})
+		if err != nil {
+			return "", err
+		}
+		return string(out), nil
 	}
 	out, err := yml.Marshal(p)
 	if err != nil {
