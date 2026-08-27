@@ -1,9 +1,11 @@
 package store
 
 import (
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"pocworkbench/internal/model"
@@ -324,6 +326,116 @@ func TestMigrateV2TestRunIndex(t *testing.T) {
 	var n int
 	if err := s2.db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name='idx_test_run_poc'`).Scan(&n); err != nil || n != 1 {
 		t.Fatalf("重开后索引应仍在: n=%d err=%v", n, err)
+	}
+}
+
+// 回归：source 枚举扩展（v1→v3 表重建迁移）。老库必须无损升级，nuclei 来源可入库。
+func TestMigrateV3SourceEnum(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 手工构造 user_version=2 的旧库形态（CHECK 不含 nuclei）
+	const legacyDDL = `
+CREATE TABLE vendor (
+  id INTEGER PRIMARY KEY,
+  canonical_name TEXT NOT NULL UNIQUE,
+  aliases TEXT NOT NULL DEFAULT '[]',
+  created_at TEXT NOT NULL
+);
+CREATE TABLE product (
+  id INTEGER PRIMARY KEY,
+  vendor_id INTEGER NOT NULL REFERENCES vendor(id) ON DELETE RESTRICT,
+  canonical_name TEXT NOT NULL,
+  aliases TEXT NOT NULL DEFAULT '[]',
+  UNIQUE(vendor_id, canonical_name)
+);
+CREATE TABLE poc (
+  uid TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  aliases TEXT NOT NULL DEFAULT '[]',
+  severity TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('critical','high','medium','low','info')),
+  category TEXT NOT NULL DEFAULT 'other',
+  vendor_id INTEGER REFERENCES vendor(id) ON DELETE RESTRICT,
+  product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
+  tags TEXT NOT NULL DEFAULT '[]',
+  description TEXT NOT NULL DEFAULT '',
+  cve TEXT,
+  status TEXT NOT NULL DEFAULT 'untested'
+    CHECK (status IN ('tested','untested','failed','faked','archived')),
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('xray','manual','script')),
+  spec_kind TEXT NOT NULL DEFAULT 'template' CHECK (spec_kind IN ('template','script')),
+  spec TEXT NOT NULL,
+  spec_sha256 TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_tested_at TEXT
+);
+CREATE TABLE test_run (
+  id INTEGER PRIMARY KEY,
+  poc_uid TEXT NOT NULL REFERENCES poc(uid) ON DELETE CASCADE,
+  target TEXT NOT NULL,
+  target_host TEXT NOT NULL DEFAULT '',
+  result TEXT NOT NULL CHECK (result IN ('hit','miss','error','timeout','cancelled')),
+  log TEXT NOT NULL DEFAULT '',
+  authorized INTEGER NOT NULL,
+  started_at TEXT NOT NULL,
+  ended_at TEXT
+);
+CREATE VIRTUAL TABLE poc_fts USING fts5(
+  uid UNINDEXED, name, aliases, tags, description, vendor, product,
+  tokenize='trigram'
+);
+`
+	if _, err := db.Exec(legacyDDL); err != nil {
+		t.Fatalf("旧库初始化失败: %v", err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := db.Exec(`INSERT INTO poc(uid,name,aliases,severity,category,tags,description,status,source,spec_kind,spec,spec_sha256,created_at,updated_at)
+		VALUES('uid-1','老 PoC','[]','high','rce','[]','','untested','xray','template','spec-text','hash-old',?,?)`, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO poc_fts(uid,name,aliases,tags,description,vendor,product) VALUES('uid-1','老 PoC','[]','[]','','UNKNOWN','')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA user_version = 2`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重开应只执行 v3 迁移并保留全部数据
+	s, err := Open(path)
+	if err != nil {
+		t.Fatalf("升级打开失败: %v", err)
+	}
+	defer s.Close()
+	var ver int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver < 3 {
+		t.Fatalf("user_version 应 >= 3: %d err=%v", ver, err)
+	}
+	items, total, err := s.ListPocs(model.Filter{}, model.Page{Number: 1, Size: 10})
+	if err != nil || total != 1 || len(items) != 1 || items[0].Name != "老 PoC" {
+		t.Fatalf("升级后数据应无损: items=%v total=%d err=%v", items, total, err)
+	}
+
+	// nuclei 来源可入库；非法来源仍被 CHECK 拒绝
+	d := draft("新 nuclei PoC", specA)
+	d.Source = "nuclei"
+	ok, err := s.InsertPoc("uid-nuclei", d, specA)
+	if err != nil || !ok {
+		t.Fatalf("nuclei 来源应可入库: ok=%v err=%v", ok, err)
+	}
+	if _, err := s.db.Exec(`UPDATE poc SET source='bogus' WHERE uid='uid-1'`); err == nil {
+		t.Fatal("非法 source 应被 CHECK 拒绝")
+	}
+
+	// 索引在重建后仍存在
+	var n int
+	if err := s.db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name='idx_poc_status'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("重建后索引缺失: n=%d err=%v", n, err)
 	}
 }
 

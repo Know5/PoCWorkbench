@@ -65,6 +65,11 @@ func (s *Store) init() error {
 			return fmt.Errorf("migrate v2: %w", err)
 		}
 	}
+	if ver < 3 {
+		if err := s.migrateV3(); err != nil {
+			return fmt.Errorf("migrate v3: %w", err)
+		}
+	}
 	return nil
 }
 
@@ -140,6 +145,79 @@ func (s *Store) migrateV2() error {
 	}
 	_, err := s.db.Exec(`PRAGMA user_version = 2`)
 	return err
+}
+
+// migrateV3 v1.1.0：source 枚举扩展 'nuclei'（Nuclei 模板导入）。
+// SQLite 不支持修改 CHECK 约束，按标准流程重建 poc 表：
+// 关外键（连接级，事务外）→ 建新表 → 拷贝 → 换名 → 重建索引 → 升版本。
+func (s *Store) migrateV3() error {
+	if _, err := s.db.Exec(`PRAGMA foreign_keys = OFF`); err != nil {
+		return fmt.Errorf("关闭外键失败: %w", err)
+	}
+	if _, err := s.db.Exec(`PRAGMA legacy_alter_table = ON`); err != nil {
+		return fmt.Errorf("设置 legacy_alter_table 失败: %w", err)
+	}
+	restore := func() {
+		_, _ = s.db.Exec(`PRAGMA legacy_alter_table = OFF`)
+		_, _ = s.db.Exec(`PRAGMA foreign_keys = ON`)
+	}
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		restore()
+		return err
+	}
+	defer tx.Rollback()
+
+	stmts := []string{
+		`CREATE TABLE poc_migrated (
+  uid TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  aliases TEXT NOT NULL DEFAULT '[]',
+  severity TEXT NOT NULL DEFAULT 'info'
+    CHECK (severity IN ('critical','high','medium','low','info')),
+  category TEXT NOT NULL DEFAULT 'other',
+  vendor_id INTEGER REFERENCES vendor(id) ON DELETE RESTRICT,
+  product_id INTEGER REFERENCES product(id) ON DELETE RESTRICT,
+  tags TEXT NOT NULL DEFAULT '[]',
+  description TEXT NOT NULL DEFAULT '',
+  cve TEXT,
+  status TEXT NOT NULL DEFAULT 'untested'
+    CHECK (status IN ('tested','untested','failed','faked','archived')),
+  source TEXT NOT NULL DEFAULT 'manual' CHECK (source IN ('xray','manual','script','nuclei')),
+  spec_kind TEXT NOT NULL DEFAULT 'template' CHECK (spec_kind IN ('template','script')),
+  spec TEXT NOT NULL,
+  spec_sha256 TEXT NOT NULL UNIQUE,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_tested_at TEXT
+)`,
+		`INSERT INTO poc_migrated
+			(uid,name,aliases,severity,category,vendor_id,product_id,tags,description,cve,status,source,spec_kind,spec,spec_sha256,created_at,updated_at,last_tested_at)
+		SELECT uid,name,aliases,severity,category,vendor_id,product_id,tags,description,cve,status,source,spec_kind,spec,spec_sha256,created_at,updated_at,last_tested_at FROM poc`,
+		`DROP TABLE poc`,
+		`ALTER TABLE poc_migrated RENAME TO poc`,
+		`CREATE INDEX idx_poc_status   ON poc(status)`,
+		`CREATE INDEX idx_poc_severity ON poc(severity)`,
+		`CREATE INDEX idx_poc_vendor   ON poc(vendor_id)`,
+		`CREATE INDEX idx_poc_cve      ON poc(cve) WHERE cve IS NOT NULL`,
+	}
+	for _, q := range stmts {
+		if _, err := tx.Exec(q); err != nil {
+			restore()
+			return fmt.Errorf("poc 表重建: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		restore()
+		return err
+	}
+	if _, err := s.db.Exec(`PRAGMA user_version = 3`); err != nil {
+		restore()
+		return err
+	}
+	restore()
+	return nil
 }
 
 func nowRFC3339() string { return time.Now().UTC().Format(time.RFC3339) }
