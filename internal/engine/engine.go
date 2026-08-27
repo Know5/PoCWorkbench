@@ -496,6 +496,8 @@ func (e *Engine) execTCP(ctx context.Context, req model.Request, target, proxy s
 	if err != nil {
 		return nil, err
 	}
+	// 所有返回路径（成功/写失败/取消/读满提前返回）都必须关闭连接，否则批量测试会泄漏 socket
+	defer conn.Close()
 	readTimeout := time.Duration(req.ReadTimeout) * time.Second
 	if readTimeout <= 0 {
 		readTimeout = 3 * time.Second
