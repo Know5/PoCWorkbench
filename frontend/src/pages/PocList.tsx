@@ -59,6 +59,10 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
   useEffect(() => { load(); }, [load]);
 
   const pages = Math.max(1, Math.ceil(total / size));
+  const hasFilter = query !== "" || severity !== "" || status !== "" || category !== "";
+  const clearFilters = () => {
+    setQueryInput(""); setQuery(""); setSeverity(""); setStatus(""); setCategory(""); setPage(1);
+  };
   const selectCls =
     "h-[30px] rounded-md border bg-transparent px-2 text-xs text-[var(--txt)] outline-none transition-colors duration-150 hover:border-[var(--line-strong)] focus:border-[var(--accent-dim)]";
   const borderStyle = { borderColor: "var(--line)" };
@@ -115,7 +119,7 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
             </tr>
           </thead>
           <tbody>
-            {items.length === 0 && !err && (
+            {items.length === 0 && !err && !hasFilter && (
               <tr>
                 <td colSpan={7} className="px-4 py-12 text-center">
                   <div className="text-[13px] text-[var(--txt-dim)]">库是空的</div>
@@ -124,6 +128,20 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
                     className="mt-3 inline-flex h-8 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 text-[13px] font-medium text-white transition-colors duration-150 hover:brightness-110"
                   >
                     去导入第一个 PoC
+                  </button>
+                </td>
+              </tr>
+            )}
+            {items.length === 0 && !err && hasFilter && (
+              <tr>
+                <td colSpan={7} className="px-4 py-12 text-center">
+                  <div className="text-[13px] text-[var(--txt-dim)]">没有符合条件的结果</div>
+                  <button
+                    onClick={clearFilters}
+                    className="mt-3 inline-flex h-8 items-center rounded-lg border px-4 text-[13px] text-[var(--txt-dim)] transition-colors duration-150 hover:bg-[var(--hover)]"
+                    style={{ borderColor: "var(--line-strong)" }}
+                  >
+                    清除筛选
                   </button>
                 </td>
               </tr>
