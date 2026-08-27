@@ -1,6 +1,6 @@
-import { useEffect, useRef, useState } from "react";
-import { Play, Square, ShieldCheck, Zap } from "lucide-react";
-import { api, type BatchResultRow, type TestRun } from "../api";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { ChevronLeft, ChevronRight, Play, Square, ShieldCheck, Zap } from "lucide-react";
+import { api, type BatchResultRow } from "../api";
 
 const resultBadge = (r: string): { cls: string; label: string } => {
   switch (r) {
@@ -11,6 +11,9 @@ const resultBadge = (r: string): { cls: string; label: string } => {
     default: return { cls: "bg-red-500/15 text-red-500", label: r || "error" };
   }
 };
+
+// 结果表每页渲染行数：尾部窗口分页，避免上千目标时整表重渲
+const RESULT_PAGE = 200;
 
 export default function TestPage({ presetUid }: { presetUid?: string }) {
   const [uid, setUid] = useState(presetUid ?? "");
@@ -30,7 +33,22 @@ export default function TestPage({ presetUid }: { presetUid?: string }) {
   const [err, setErr] = useState("");
   const logRef = useRef<HTMLPreElement>(null);
 
+  // 结果行先落 ref 缓冲、定时批量刷入 state：结果风暴下不再逐事件整表重渲
+  const pendingRows = useRef<BatchResultRow[]>([]);
+  const flushTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // 仅当日志本就贴近底部时才自动滚动，翻看旧日志不被拽回
+  const stickBottom = useRef(true);
+
   useEffect(() => {
+    const scheduleFlush = () => {
+      if (flushTimer.current !== undefined) return;
+      flushTimer.current = setTimeout(() => {
+        flushTimer.current = undefined;
+        const add = pendingRows.current;
+        pendingRows.current = [];
+        if (add.length > 0) setRows((rs) => [...rs, ...add]);
+      }, 200);
+    };
     // 仅挂载时注册一次；回调内读 ref 而非 state，规避重挂间隙丢事件
     api.onBatchLog((id, line) => {
       const bid = batchIdRef.current;
@@ -38,7 +56,7 @@ export default function TestPage({ presetUid }: { presetUid?: string }) {
     });
     api.onBatchResult((id, row) => {
       const bid = batchIdRef.current;
-      if (bid === null || id === bid) setRows((rs) => [...rs, row]);
+      if (bid === null || id === bid) { pendingRows.current.push(row); scheduleFlush(); }
     });
     api.onBatchProgress((id, d, t) => {
       const bid = batchIdRef.current;
@@ -47,6 +65,11 @@ export default function TestPage({ presetUid }: { presetUid?: string }) {
     api.onBatchDone((id, t, hits, status) => {
       const bid = batchIdRef.current;
       if (bid === null || id !== bid) return;
+      // 收尾前把缓冲中的剩余结果一次性入库到视图
+      if (flushTimer.current !== undefined) { clearTimeout(flushTimer.current); flushTimer.current = undefined; }
+      const add = pendingRows.current;
+      pendingRows.current = [];
+      setRows((rs) => [...rs, ...add]);
       setRunning(false);
       setDone(t);
       setTotal(t);
@@ -56,17 +79,39 @@ export default function TestPage({ presetUid }: { presetUid?: string }) {
           : `完成 ${t} 个 · 命中 ${hits} · 未命中 ${t - hits}`,
       );
     });
-    return () => api.offBatchEvents();
+    return () => {
+      api.offBatchEvents();
+      if (flushTimer.current !== undefined) clearTimeout(flushTimer.current);
+    };
   }, []);
 
   useEffect(() => {
-    logRef.current?.scrollTo(0, logRef.current.scrollHeight);
+    if (stickBottom.current) logRef.current?.scrollTo(0, logRef.current.scrollHeight);
   }, [lines]);
 
   const targetList = targetsText.split("\n").map((s) => s.trim()).filter(Boolean);
 
+  // 统计一次遍历得出；此前每次 render 对全量 rows 做 3 遍 filter
+  const stats = useMemo(() => {
+    let hit = 0, miss = 0;
+    for (const r of rows) {
+      if (r.result === "hit") hit++;
+      else if (r.result === "miss") miss++;
+    }
+    return { hit, miss, other: rows.length - hit - miss };
+  }, [rows]);
+
+  const [pageBack, setPageBack] = useState(0); // 0=最新一页，N=往前 N 页
+  const totalPages = Math.max(1, Math.ceil(rows.length / RESULT_PAGE));
+  const viewStart = Math.max(0, rows.length - (pageBack + 1) * RESULT_PAGE);
+  const viewRows = useMemo(
+    () => rows.slice(viewStart, viewStart + RESULT_PAGE),
+    [rows, viewStart],
+  );
+
   const start = async () => {
     setErr(""); setLines([]); setRows([]); setDone(0); setTotal(targetList.length); setSummary(""); setInvalidCount(0);
+    pendingRows.current = []; setPageBack(0); stickBottom.current = true;
     try {
       const res = await api.runTestBatch(uid, targetList, proxy.trim(), authorized);
       setBatchId(res.id);
@@ -163,27 +208,39 @@ export default function TestPage({ presetUid }: { presetUid?: string }) {
           <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b px-4 py-2.5"
             style={{ borderColor: "var(--line)", background: "var(--bg-raise)" }}>
             <span className="text-[11px] font-medium text-[var(--txt-dim)]">结果播报</span>
-            {(() => {
-              const hit = rows.filter((r) => r.result === "hit").length;
-              const miss = rows.filter((r) => r.result === "miss").length;
-              const other = rows.length - hit - miss;
-              return (
-                <span className="tabular font-mono-data text-xs text-[var(--txt-dim)]">
-                  共 <b className="text-[var(--txt)]">{rows.length}</b> ·
-                  <b className="ml-1 text-emerald-600 dark:text-emerald-400">命中 {hit}</b> ·
-                  未命中 {miss}{other > 0 ? <> · 异常 {other}</> : null}
-                  {invalidCount > 0 && <> · 非法目标 {invalidCount}</>}
-                </span>
-              );
-            })()}
-            {summary && <span className="ml-auto text-xs text-[var(--accent)]">{summary}</span>}
+            <span className="tabular font-mono-data text-xs text-[var(--txt-dim)]">
+              共 <b className="text-[var(--txt)]">{rows.length}</b> ·
+              <b className="ml-1 text-emerald-600 dark:text-emerald-400">命中 {stats.hit}</b> ·
+              未命中 {stats.miss}{stats.other > 0 ? <> · 异常 {stats.other}</> : null}
+              {invalidCount > 0 && <> · 非法目标 {invalidCount}</>}
+            </span>
+            <div className="ml-auto flex items-center gap-1.5">
+              {summary && <span className="mr-2 text-xs text-[var(--accent)]">{summary}</span>}
+              {totalPages > 1 && (
+                <>
+                  <button disabled={pageBack >= totalPages - 1} onClick={() => setPageBack((p) => p + 1)}
+                    className="flex h-6 w-6 items-center justify-center rounded border transition-colors duration-150 hover:bg-[var(--hover)] disabled:opacity-30"
+                    style={{ borderColor: "var(--line)" }} title="较早的结果">
+                    <ChevronLeft size={12} />
+                  </button>
+                  <span className="tabular font-mono-data text-[11px] text-[var(--txt-dim)]">
+                    {pageBack === 0 ? `最新 ${rows.length - viewStart}/${totalPages} 页` : `-第 ${pageBack + 1}/${totalPages} 页`}
+                  </span>
+                  <button disabled={pageBack === 0} onClick={() => setPageBack((p) => Math.max(0, p - 1))}
+                    className="flex h-6 w-6 items-center justify-center rounded border transition-colors duration-150 hover:bg-[var(--hover)] disabled:opacity-30"
+                    style={{ borderColor: "var(--line)" }} title="较新的结果">
+                    <ChevronRight size={12} />
+                  </button>
+                </>
+              )}
+            </div>
           </div>
           <table className="w-full text-[13px]">
             <tbody>
-              {rows.map((r, i) => {
+              {viewRows.map((r, i) => {
                 const b = resultBadge(r.result);
                 return (
-                  <tr key={`${r.target}-${i}`} className="border-b last:border-b-0 hover:bg-[var(--hover)] transition-colors duration-150"
+                  <tr key={`${r.target}-${viewStart + i}`} className="border-b last:border-b-0 hover:bg-[var(--hover)] transition-colors duration-150"
                     style={{ borderColor: "var(--line)" }}>
                     <td className="px-4 py-2 font-mono-data text-xs">{r.target}</td>
                     <td className="w-24 px-3 py-2">
@@ -196,13 +253,21 @@ export default function TestPage({ presetUid }: { presetUid?: string }) {
               })}
             </tbody>
           </table>
+          {totalPages > 1 && pageBack === 0 && (
+            <div className="border-t px-4 py-1.5 text-right text-[11px] text-[var(--txt-faint)]" style={{ borderColor: "var(--line)" }}>
+              仅渲染最近 {RESULT_PAGE} 条，左侧箭头回看更早结果（完整记录均已落库）
+            </div>
+          )}
         </section>
       )}
 
       {lines.length > 0 && (
         <section>
           <div className="mb-2 text-[11px] font-medium text-[var(--txt-dim)]">详细日志</div>
-          <pre ref={logRef}
+          <pre ref={logRef} onScroll={(e) => {
+            const el = e.currentTarget;
+            stickBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight < 48;
+          }}
             className="max-h-72 overflow-auto whitespace-pre-wrap break-all rounded-xl border bg-[var(--bg-input)] p-4 font-mono-data text-xs leading-6"
             style={{ borderColor: "var(--line)" }}>
             {lines.join("\n")}
@@ -223,6 +288,3 @@ function finalRunHint() {
     </p>
   );
 }
-
-// TestRun 类型仍被历史事件签名引用，保留导入别名避免 tree-shake 报错
-export type { TestRun };
