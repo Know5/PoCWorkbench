@@ -387,7 +387,7 @@ func TestListPocsFilterByVendorProduct(t *testing.T) {
 	}
 
 	// 回归：UNKNOWN 为未指派厂商的合成名（IFNULL），应命中 vendor_id 为空的行
-	if err := s.db.Exec(`UPDATE poc SET vendor_id=NULL WHERE uid=?`, "uid-1").Err; err != nil {
+	if _, err := s.db.Exec(`UPDATE poc SET vendor_id=NULL WHERE uid=?`, "uid-1"); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err = s.ListPocs(model.Filter{Vendor: "UNKNOWN"}, model.Page{Number: 1, Size: 10})
