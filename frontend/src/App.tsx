@@ -15,7 +15,7 @@ import Settings from "./pages/Settings";
 
 export type Route =
   | { page: "dashboard" }
-  | { page: "list"; status?: string; severity?: string }
+  | { page: "list"; status?: string; severity?: string; vendor?: string }
   | { page: "detail"; uid: string }
   | { page: "create" }
   | { page: "edit"; uid: string }
@@ -121,7 +121,7 @@ export default function App() {
         )}
         <div className="min-h-0 flex-1 overflow-auto p-5 pt-1">
           {route.page === "dashboard" && <Dashboard onNav={nav} />}
-          {route.page === "list" && <PocList onNav={nav} initialStatus={route.status ?? ""} initialSeverity={route.severity ?? ""} />}
+          {route.page === "list" && <PocList onNav={nav} initialStatus={route.status ?? ""} initialSeverity={route.severity ?? ""} initialVendor={route.vendor ?? ""} />}
           {route.page === "detail" && <PocDetail uid={route.uid} onNav={nav} />}
           {route.page === "create" && <PocForm mode="create" onNav={nav} />}
           {route.page === "edit" && <PocForm mode="edit" uid={route.uid} onNav={nav} />}

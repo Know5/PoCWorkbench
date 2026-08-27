@@ -88,8 +88,9 @@ export default function Dashboard({ onNav }: { onNav: (r: Route) => void }) {
               return (
                 <button
                   key={s}
-                  onClick={() => onNav({ page: "list" })}
-                  className="flex w-full items-center gap-2.5 rounded text-left"
+                  onClick={() => onNav({ page: "list", severity: s })}
+                  title={`查看全部 ${s} 级 PoC`}
+                  className="flex w-full items-center gap-2.5 rounded text-left transition-colors duration-150 hover:bg-[var(--hover)]"
                 >
                   <span className={`h-2 w-2 shrink-0 rounded-full ${sevColor(s)}`} />
                   <span className="w-14 shrink-0 font-mono-data text-xs text-[var(--txt)]">{s}</span>
@@ -115,7 +116,8 @@ export default function Dashboard({ onNav }: { onNav: (r: Route) => void }) {
             {(data.topVendors ?? []).map((vc, i) => (
               <button
                 key={vc.vendor}
-                onClick={() => onNav({ page: "list" })}
+                onClick={() => onNav({ page: "list", vendor: vc.vendor })}
+                title={`查看 ${vc.vendor} 的 PoC`}
                 className="flex w-full items-center gap-2.5 rounded px-1.5 py-1 text-left transition-colors duration-150 hover:bg-[var(--hover)]"
               >
                 <span className="tabular w-4 text-right font-mono-data text-[10px] text-[var(--txt-faint)]">{i + 1}</span>

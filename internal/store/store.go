@@ -560,7 +560,12 @@ func (s *Store) buildWhere(f model.Filter) (string, []any, error) {
 		args = append(args, a...)
 	}
 	if f.Vendor != "" {
-		add(` v.canonical_name = ?`, f.Vendor)
+		// UNKNOWN 是 Dashboard 对未指派厂商的合成展示名（IFNULL），不是真实字典项
+		if f.Vendor == "UNKNOWN" {
+			add(` p.vendor_id IS NULL`)
+		} else {
+			add(` v.canonical_name = ?`, f.Vendor)
+		}
 	}
 	if f.Product != "" {
 		add(` pr.canonical_name = ?`, f.Product)

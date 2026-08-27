@@ -385,6 +385,15 @@ func TestListPocsFilterByVendorProduct(t *testing.T) {
 	if err != nil || total != 0 {
 		t.Fatalf("未知厂商应零命中且不报错: err=%v total=%d", err, total)
 	}
+
+	// 回归：UNKNOWN 为未指派厂商的合成名（IFNULL），应命中 vendor_id 为空的行
+	if err := s.db.Exec(`UPDATE poc SET vendor_id=NULL WHERE uid=?`, "uid-1").Err; err != nil {
+		t.Fatal(err)
+	}
+	items, _, err = s.ListPocs(model.Filter{Vendor: "UNKNOWN"}, model.Page{Number: 1, Size: 10})
+	if err != nil || len(items) != 1 || items[0].UID != "uid-1" {
+		t.Fatalf("UNKNOWN 应筛选未指派厂商: items=%v err=%v", items, err)
+	}
 }
 
 // 回归：未归档记录删除必须被拒，且不得误删 FTS 行。

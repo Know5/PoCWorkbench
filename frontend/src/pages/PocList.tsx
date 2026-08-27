@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Search, ChevronLeft, ChevronRight } from "lucide-react";
+import { Search, ChevronLeft, ChevronRight, X } from "lucide-react";
 import {
   api, sevColor, sevText, statusColor, SEVERITIES, STATUSES, CATEGORIES,
   type Summary,
@@ -7,7 +7,7 @@ import {
 import ConfirmDialog from "../components/ConfirmDialog";
 import type { Route } from "../App";
 
-export default function PocList({ onNav, initialStatus = "", initialSeverity = "" }: { onNav: (r: Route) => void; initialStatus?: string; initialSeverity?: string }) {
+export default function PocList({ onNav, initialStatus = "", initialSeverity = "", initialVendor = "" }: { onNav: (r: Route) => void; initialStatus?: string; initialSeverity?: string; initialVendor?: string }) {
   const [items, setItems] = useState<Summary[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
@@ -17,6 +17,8 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
   const [severity, setSeverity] = useState(initialSeverity);
   const [status, setStatus] = useState(initialStatus);
   const [category, setCategory] = useState("");
+  // 厂商深链筛选（Dashboard Top10 / UNKNOWN）：无下拉项，以可移除标签呈现
+  const [vendor, setVendor] = useState(initialVendor);
   const [err, setErr] = useState("");
   // 待彻底删除的 PoC（弹窗确认前仅暂存 uid）
   const [delUid, setDelUid] = useState<string | null>(null);
@@ -45,7 +47,7 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
     const seq = ++loadSeq.current;
     api
       .listPocs(
-        { query, severity, status, category },
+        { query, severity, status, category, vendor },
         { number: page, size, sort: "updated_desc" },
       )
       .then((r) => {
@@ -57,14 +59,14 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
         if (seq !== loadSeq.current) return;
         setErr(e instanceof Error ? e.message : String(e));
       });
-  }, [query, severity, status, category, page]);
+  }, [query, severity, status, category, vendor, page]);
 
   useEffect(() => { load(); }, [load]);
 
   const pages = Math.max(1, Math.ceil(total / size));
-  const hasFilter = query !== "" || severity !== "" || status !== "" || category !== "";
+  const hasFilter = query !== "" || severity !== "" || status !== "" || category !== "" || vendor !== "";
   const clearFilters = () => {
-    setQueryInput(""); setQuery(""); setSeverity(""); setStatus(""); setCategory(""); setPage(1);
+    setQueryInput(""); setQuery(""); setSeverity(""); setStatus(""); setCategory(""); setVendor(""); setPage(1);
   };
   const selectCls =
     "h-[30px] rounded-md border bg-transparent px-2 text-xs text-[var(--txt)] outline-none transition-colors duration-150 hover:border-[var(--line-strong)] focus:border-[var(--accent-dim)]";
@@ -99,6 +101,16 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
           {STATUSES.map((s) => <option key={s}>{s}</option>)}
           <option value="archived">已归档</option>
         </select>
+
+        {vendor !== "" && (
+          <span className="inline-flex h-[30px] items-center gap-1.5 rounded-md border bg-[var(--chip)] px-2 text-xs text-[var(--txt)]" style={{ borderColor: "var(--line)" }}>
+            厂商：<b className="max-w-[160px] truncate font-medium">{vendor}</b>
+            <button onClick={() => { setVendor(""); setPage(1); }} aria-label="移除厂商筛选"
+              className="rounded p-0.5 text-[var(--txt-dim)] transition-colors duration-150 hover:bg-[var(--hover)] hover:text-[var(--danger)]">
+              <X size={12} strokeWidth={2} />
+            </button>
+          </span>
+        )}
 
         <span className="tabular ml-auto mr-1 text-xs text-[var(--txt-dim)]">{total} 条</span>
       </div>
