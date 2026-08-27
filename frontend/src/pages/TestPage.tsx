@@ -68,10 +68,10 @@ export default function TestPage({ presetUid }: { presetUid?: string }) {
   const start = async () => {
     setErr(""); setLines([]); setRows([]); setDone(0); setTotal(targetList.length); setSummary(""); setInvalidCount(0);
     try {
-      const [id, invalid] = await api.runTestBatch(uid, targetList, proxy.trim(), authorized);
-      setBatchId(id);
-      batchIdRef.current = id;
-      setInvalidCount(invalid?.length ?? 0);
+      const res = await api.runTestBatch(uid, targetList, proxy.trim(), authorized);
+      setBatchId(res.id);
+      batchIdRef.current = res.id;
+      setInvalidCount(res.invalid?.length ?? 0);
       setRunning(true);
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));

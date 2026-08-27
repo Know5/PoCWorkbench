@@ -103,6 +103,9 @@ export interface BatchResultRow {
   result: string; // hit|miss|error|timeout|cancelled
 }
 
+/** 批量任务启动返回：batchID 与预检剔除的非法目标 */
+export interface BatchStart { id: string; invalid: string[] }
+
 export interface DashboardData {
   byStatus: Record<string, number>;
   bySeverity: Record<string, number>;
@@ -148,7 +151,7 @@ export const api = {
   runTest: (uid: string, target: string, proxy: string, authorized: boolean) =>
     call<number>("RunTest", uid, target, proxy, authorized),
   runTestBatch: (uid: string, targets: string[], proxy: string, authorized: boolean) =>
-    call<string>("RunTestBatch", uid, targets, proxy, authorized),
+    call<BatchStart>("RunTestBatch", uid, targets, proxy, authorized),
   cancelBatch: (id: string) => call<void>("CancelBatch", id),
   compileRuleExpr: (expr: string) => call<void>("CompileRuleExpr", expr),
   compileFinalExpr: (final: string, ruleNames: string[]) =>

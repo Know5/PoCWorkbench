@@ -483,21 +483,28 @@ type BatchTargetResult struct {
 	Result string `json:"result"` // hit|miss|error|timeout|cancelled
 }
 
+// BatchStart 批量任务启动返回：batchID 与预检剔除的非法目标。
+// Wails 绑定契约只保证「无值/单值/(值,error)」，多返回值行为不受约束，故收拢为结构体。
+type BatchStart struct {
+	ID      string   `json:"id"`
+	Invalid []string `json:"invalid"`
+}
+
 // RunTestBatch 对多目标顺序执行同一 PoC；立即返回 batchID 与非法目标列表。
 // 事件流："batch:log"(id,line) / "batch:result"(id,row) / "batch:progress"(id,done,total) / "batch:done"(id,total,hits)
-func (a *App) RunTestBatch(uid string, targets []string, proxy string, authorized bool) (string, []string, error) {
+func (a *App) RunTestBatch(uid string, targets []string, proxy string, authorized bool) (BatchStart, error) {
 	if err := a.requireStore(); err != nil {
-		return "", nil, err
+		return BatchStart{}, err
 	}
 	if !authorized {
-		return "", nil, fmt.Errorf("未确认测试授权，拒绝执行")
+		return BatchStart{}, fmt.Errorf("未确认测试授权，拒绝执行")
 	}
 	p, err := a.store.GetPoc(uid)
 	if err != nil {
-		return "", nil, fmt.Errorf("PoC 不存在: %w", err)
+		return BatchStart{}, fmt.Errorf("PoC 不存在: %w", err)
 	}
 	if p.Metadata.Kind == "script" {
-		return "", nil, fmt.Errorf("脚本类 PoC 不支持自动执行")
+		return BatchStart{}, fmt.Errorf("脚本类 PoC 不支持自动执行")
 	}
 
 	valid := make([]string, 0, len(targets))
@@ -514,7 +521,7 @@ func (a *App) RunTestBatch(uid string, targets []string, proxy string, authorize
 		}
 	}
 	if len(valid) == 0 {
-		return "", invalid, fmt.Errorf("没有合法目标（http 目标须为 http/https URL，tcp 须为 host:port）")
+		return BatchStart{Invalid: invalid}, fmt.Errorf("没有合法目标（http 目标须为 http/https URL，tcp 须为 host:port）")
 	}
 	id := fmt.Sprintf("batch-%d", time.Now().UnixNano())
 	ctx, cancel := context.WithCancel(context.Background())
@@ -565,7 +572,7 @@ func (a *App) RunTestBatch(uid string, targets []string, proxy string, authorize
 		}
 		a.emit("batch:done", id, len(valid), hits, "finished")
 	}()
-	return id, invalid, nil
+	return BatchStart{ID: id, Invalid: invalid}, nil
 }
 
 // CancelBatch 取消进行中的批量任务。
