@@ -15,10 +15,12 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	netproxy "golang.org/x/net/proxy"
 
@@ -68,8 +70,8 @@ type Response struct {
 	Body        []byte
 	ContentType string
 	Raw         []byte
-	// ElapsedMs 本次规则请求的网络耗时（毫秒），供时间盲注类表达式使用。
-	// http：从发出请求到读完响应体；tcp：从拨号到读结束（含 read_timeout 等待）。
+	// ElapsedMs 本条规则的响应耗时（毫秒），供时间盲注类表达式使用。
+	// http：请求写完 → 首个响应字节（不含 DNS/建连/下载）；tcp：含拨号与读等待的全程。
 	ElapsedMs int64
 }
 
@@ -95,25 +97,34 @@ func (e *Engine) httpClientFor(proxyURL string) (*http.Client, error) {
 		return c, nil
 	}
 	u, _ := url.Parse(proxyURL) // 上面已校验
-	transport := &http.Transport{
-		Proxy:           http.ProxyURL(u),
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
 	c := &http.Client{
 		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
-		Transport:     transport,
+		Transport:     newHTTPTransport(u),
 	}
 	e.clients[proxyURL] = c
 	return c, nil
 }
 
-var (
-	defaultTransport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	directClient     = &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
-		Transport:     defaultTransport,
+// newHTTPTransport 统一配置拨号/TLS 握手/空闲连接：DNS 卡死与握手悬挂先行失败，
+// 不必等 runCtx 60s 硬超时兜底；空闲连接限时关闭，批量场景不堆积半开连接。
+func newHTTPTransport(proxyURL *url.URL) *http.Transport {
+	t := &http.Transport{
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, // 对齐安全测试惯例
+		DialContext:         (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		TLSHandshakeTimeout: 10 * time.Second,
+		IdleConnTimeout:     90 * time.Second,
+		MaxIdleConnsPerHost: 8,
 	}
-)
+	if proxyURL != nil {
+		t.Proxy = http.ProxyURL(proxyURL)
+	}
+	return t
+}
+
+var directClient = &http.Client{
+	CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
+	Transport:     newHTTPTransport(nil),
+}
 
 // compileCached 带缓存的编译。
 func (e *Engine) compileCached(src string, extra ...expr.Option) (*vm.Program, error) {
@@ -325,21 +336,16 @@ func describeResponse(transport string, r *Response) string {
 func head(b []byte, n int) string {
 	s := string(b)
 	if len(s) > n {
-		s = s[:n] + "...(截断)"
+		cut := n // 回退到 UTF-8 rune 边界，避免日志头部尾部乱码
+		for cut > 0 && !utf8.RuneStart(s[cut]) {
+			cut--
+		}
+		s = s[:cut] + "...(截断)"
 	}
 	return strings.ReplaceAll(s, "\n", "\\n")
 }
 
 // ---- HTTP ----
-
-var httpClient = &http.Client{
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse // 关闭重定向跟随
-	},
-	Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, // 对齐安全测试惯例
-	},
-}
 
 func (e *Engine) execHTTP(ctx context.Context, req model.Request, target, proxy string) (*Response, error) {
 	fullURL := strings.TrimRight(target, "/") + req.Path
@@ -356,13 +362,23 @@ func (e *Engine) execHTTP(ctx context.Context, req model.Request, target, proxy 
 	if err != nil {
 		return nil, err
 	}
+	// 计时口径：请求写完 → 首个响应字节。时间盲注的 SLEEP(N) 发生在服务端生成响应阶段，
+	// 该区间不含 DNS/建连（同 Run 内首条规则不再独自承担握手成本）与下载耗时
+	var wroteReqAt, firstByteAt time.Time
+	httpReq = httpReq.WithContext(httptrace.WithClientTrace(ctx, &httptrace.ClientTrace{
+		WroteRequest:         func(httptrace.WroteRequestInfo) { wroteReqAt = time.Now() },
+		GotFirstResponseByte: func() { firstByteAt = time.Now() },
+	}))
 	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
-	elapsed := time.Since(started) // 含读体：时间盲注的延迟发生在响应产生阶段
+	elapsed := time.Since(started) // 兜底：trace 事件缺失时退化为全耗时
+	if !wroteReqAt.IsZero() && !firstByteAt.IsZero() && firstByteAt.After(wroteReqAt) {
+		elapsed = firstByteAt.Sub(wroteReqAt)
+	}
 	if err != nil && err != io.EOF {
 		return nil, err
 	}
