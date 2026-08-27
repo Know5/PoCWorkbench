@@ -122,14 +122,6 @@ async function call<T>(method: string, ...args: unknown[]): Promise<T> {
   return fn.apply(a, args) as Promise<T>;
 }
 
-function isTestRun(v: unknown): v is TestRun {
-  return (
-    typeof v === "object" && v !== null &&
-    "id" in v && typeof v.id === "number" &&
-    "result" in v && typeof v.result === "string"
-  );
-}
-
 export const api = {
   appVersion: () => call<string>("AppVersion"),
   startupError: () => call<string>("StartupError"),
@@ -148,15 +140,12 @@ export const api = {
   mergeVendorAlias: (canonical: string, alias: string) => call<void>("MergeVendorAlias", canonical, alias),
   setPocVendorProduct: (uid: string, v: string, p: string) => call<void>("SetPocVendorProduct", uid, v, p),
   suggestVendor: (text: string) => call<string[]>("SuggestVendorProduct", text),
-  runTest: (uid: string, target: string, proxy: string, authorized: boolean) =>
-    call<number>("RunTest", uid, target, proxy, authorized),
   runTestBatch: (uid: string, targets: string[], proxy: string, authorized: boolean) =>
     call<BatchStart>("RunTestBatch", uid, targets, proxy, authorized),
   cancelBatch: (id: string) => call<void>("CancelBatch", id),
   compileRuleExpr: (expr: string) => call<void>("CompileRuleExpr", expr),
   compileFinalExpr: (final: string, ruleNames: string[]) =>
     call<void>("CompileFinalExpr", final, ruleNames),
-  cancelTest: (runId: number) => call<void>("CancelTest", runId),
   listTestRuns: (uid: string) => call<TestRun[]>("ListTestRuns", uid),
   getTestRun: (id: number) => call<TestRun>("GetTestRun", id),
   exportPoc: (uid: string) => call<string>("ExportPoc", uid),
@@ -164,25 +153,6 @@ export const api = {
   backupDB: () => call<string>("BackupDB"),
   pickRestoreFile: () => call<string>("PickRestoreFile"),
   restoreBackup: (path: string) => call<void>("RestoreBackup", path),
-
-  onTestLog: (cb: (runId: number, line: string) => void) => {
-    wailsRuntime()?.EventsOn("test:log", (...data: unknown[]) => {
-      const runId = data[0];
-      const line = data[1];
-      if (typeof runId === "number" && typeof line === "string") cb(runId, line);
-    });
-  },
-  offTestLog: () => wailsRuntime()?.EventsOff("test:log"),
-  onTestDone: (cb: (runId: number, tr: TestRun | null, err: string) => void) => {
-    wailsRuntime()?.EventsOn("test:done", (...data: unknown[]) => {
-      const runId = data[0];
-      const errStr = data[2];
-      if (typeof runId === "number") {
-        cb(runId, isTestRun(data[1]) ? data[1] : null, typeof errStr === "string" ? errStr : "");
-      }
-    });
-  },
-  offTestDone: () => wailsRuntime()?.EventsOff("test:done"),
 
   onBatchLog: (cb: (id: string, line: string) => void) => {
     wailsRuntime()?.EventsOn("batch:log", (...data: unknown[]) => {

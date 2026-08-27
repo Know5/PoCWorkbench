@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { ChevronLeft, ChevronRight, Play, Square, ShieldCheck, Zap } from "lucide-react";
+import { ChevronLeft, ChevronRight, Square, ShieldCheck, Zap } from "lucide-react";
 import { api, type BatchResultRow } from "../api";
 
 const resultBadge = (r: string): { cls: string; label: string } => {
