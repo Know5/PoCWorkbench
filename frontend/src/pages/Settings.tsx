@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Save, AlertTriangle, DatabaseBackup, Gauge, Check, SunMoon, Undo2 } from "lucide-react";
 import { api } from "../api";
 import { getPref, applyTheme, type ThemePref } from "../theme";
+import ConfirmDialog from "../components/ConfirmDialog";
 
 export default function Settings() {
   const [msg, setMsg] = useState("");
@@ -9,6 +10,8 @@ export default function Settings() {
   const [busy, setBusy] = useState(false);
   const [pref, setPref] = useState<ThemePref>(getPref());
   const [version, setVersion] = useState("…");
+  // 待恢复的备份路径（弹窗确认前暂存）
+  const [restorePath, setRestorePath] = useState<string | null>(null);
 
   useEffect(() => {
     api.appVersion().then(setVersion).catch(() => setVersion("unknown"));
@@ -31,13 +34,21 @@ export default function Settings() {
     try {
       const p = await api.pickRestoreFile();
       if (!p) return; // 用户取消选择
-      if (!window.confirm(`确认用该备份覆盖当前数据库？\n\n${p}\n\n进行中的测试将被取消，恢复成功后页面自动刷新。`)) return;
-      setBusy(true);
-      await api.restoreBackup(p);
+      setRestorePath(p); // 进入确认弹窗，确认后才执行
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  const doRestoreConfirmed = async () => {
+    if (restorePath === null) return;
+    setBusy(true);
+    try {
+      await api.restoreBackup(restorePath);
       window.location.reload(); // 全量加载恢复后的数据
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
-    } finally {
+      setRestorePath(null);
       setBusy(false);
     }
   };
@@ -94,6 +105,18 @@ export default function Settings() {
         )}
         {err && <div className="text-[13px] text-[var(--danger)]">{err}</div>}
       </section>
+
+      <ConfirmDialog
+        open={restorePath !== null}
+        title="用备份覆盖当前数据库？"
+        danger
+        confirmText="恢复"
+        busy={busy}
+        onCancel={() => setRestorePath(null)}
+        onConfirm={doRestoreConfirmed}
+      >
+        {`将使用以下备份覆盖现有数据，进行中的测试会被取消，恢复成功后页面自动刷新。\n\n${restorePath ?? ""}`}
+      </ConfirmDialog>
 
       <section className="rounded-xl border border-[var(--warn)]/30 bg-[var(--warn)]/[0.06] p-4">
         <div className="mb-2 flex items-center gap-2 text-[13px] font-semibold text-[var(--warn)]">

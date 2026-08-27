@@ -3,6 +3,7 @@ import { ArrowLeft, Pencil, Play, Archive, RotateCcw, Check, Download, Tag, Buil
 import CodeMirror from "@uiw/react-codemirror";
 import { yaml } from "@codemirror/lang-yaml";
 import { api, sevColor, statusColor, type Pwf, type TestRun } from "../api";
+import ConfirmDialog from "../components/ConfirmDialog";
 import { useResolvedTheme } from "../theme";
 import type { Route } from "../App";
 
@@ -13,6 +14,8 @@ export default function PocDetail({ uid, onNav }: { uid: string; onNav: (r: Rout
   const theme = useResolvedTheme();
   // 列表接口只带日志预览；展开时按需拉取全文
   const [fullLogs, setFullLogs] = useState<Record<number, string>>({});
+  // 归档确认弹窗（替代原生 confirm）
+  const [confirmArchive, setConfirmArchive] = useState(false);
 
   useEffect(() => {
     api.getPoc(uid).then(setPoc).catch((e: unknown) =>
@@ -72,19 +75,30 @@ export default function PocDetail({ uid, onNav }: { uid: string; onNav: (r: Rout
           ) : (
             <ActionBtn
               icon={Archive} label="归档"
-              onClick={async () => {
-                if (!window.confirm("确认归档该 PoC？归档后在列表筛选「已归档」可恢复。")) return;
-                try {
-                  await api.archivePoc(uid);
-                  setPoc({ ...poc, metadata: { ...m, status: "archived" } });
-                } catch (e) {
-                  setErr(e instanceof Error ? e.message : String(e));
-                }
-              }}
+              onClick={() => setConfirmArchive(true)}
             />
           )}
         </span>
       </div>
+
+      <ConfirmDialog
+        open={confirmArchive}
+        title="归档该 PoC？"
+        confirmText="归档"
+        onCancel={() => setConfirmArchive(false)}
+        onConfirm={async () => {
+          try {
+            await api.archivePoc(uid);
+            if (poc) setPoc({ ...poc, metadata: { ...m, status: "archived" } });
+            setConfirmArchive(false);
+          } catch (e) {
+            setErr(e instanceof Error ? e.message : String(e));
+            setConfirmArchive(false);
+          }
+        }}
+      >
+        归档后从默认列表隐藏，在列表筛选「已归档」可查看并恢复。
+      </ConfirmDialog>
 
       <div className="panel grid grid-cols-4 gap-x-5 gap-y-3 p-5">
         {metaItems.map((it) => {

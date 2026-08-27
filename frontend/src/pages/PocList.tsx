@@ -4,6 +4,7 @@ import {
   api, sevColor, sevText, statusColor, SEVERITIES, STATUSES, CATEGORIES,
   type Summary,
 } from "../api";
+import ConfirmDialog from "../components/ConfirmDialog";
 import type { Route } from "../App";
 
 export default function PocList({ onNav, initialStatus = "", initialSeverity = "" }: { onNav: (r: Route) => void; initialStatus?: string; initialSeverity?: string }) {
@@ -17,6 +18,8 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
   const [status, setStatus] = useState(initialStatus);
   const [category, setCategory] = useState("");
   const [err, setErr] = useState("");
+  // 待彻底删除的 PoC（弹窗确认前仅暂存 uid）
+  const [delUid, setDelUid] = useState<string | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   // 请求序号：筛选快速连续变化时丢弃过期响应
   const loadSeq = useRef(0);
@@ -183,8 +186,7 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (!window.confirm("彻底删除该 PoC？此操作不可恢复。")) return;
-                          api.deletePoc(it.uid).then(load);
+                          setDelUid(it.uid);
                         }}
                         className="rounded border border-red-500/40 px-2 py-0.5 text-[11px] text-red-500 transition-colors duration-150 hover:bg-red-500/10"
                       >删除</button>
@@ -196,6 +198,27 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
           </tbody>
         </table>
       </div>
+
+      <ConfirmDialog
+        open={delUid !== null}
+        title="彻底删除该 PoC？"
+        danger
+        confirmText="删除"
+        onCancel={() => setDelUid(null)}
+        onConfirm={async () => {
+          if (delUid === null) return;
+          try {
+            await api.deletePoc(delUid);
+            setDelUid(null);
+            load();
+          } catch (e) {
+            setErr(e instanceof Error ? e.message : String(e));
+            setDelUid(null);
+          }
+        }}
+      >
+        「{items.find((i) => i.uid === delUid)?.name ?? delUid}」将被永久移除，此操作不可恢复。
+      </ConfirmDialog>
 
       <div className="flex items-center justify-end gap-2 text-xs">
         <span className="tabular mr-1 font-mono-data text-[var(--txt-dim)]">{page} / {pages}</span>
