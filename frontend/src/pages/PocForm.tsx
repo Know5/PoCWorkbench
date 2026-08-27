@@ -533,20 +533,23 @@ function ExprInput({ value, onChange, validate, placeholder }: {
 }) {
   const [status, setStatus] = useState<{ ok: boolean | null; msg: string }>({ ok: null, msg: "" });
   const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  // validate 常为调用方内联箭头（每次 render 新引用）；入 ref 后防抖只随 value 变化重启
+  const validateRef = useRef(validate);
+  useEffect(() => { validateRef.current = validate; });
 
   useEffect(() => {
     if (!value.trim()) { setStatus({ ok: null, msg: "" }); return; }
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(async () => {
       try {
-        await validate(value);
+        await validateRef.current(value);
         setStatus({ ok: true, msg: "语法正确" });
       } catch (e) {
         setStatus({ ok: false, msg: e instanceof Error ? e.message : String(e) });
       }
     }, 400);
     return () => { clearTimeout(timerRef.current); };
-  }, [value, validate]);
+  }, [value]);
 
   return (
     <div>
