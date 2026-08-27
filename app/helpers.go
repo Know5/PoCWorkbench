@@ -2,15 +2,16 @@ package app
 
 import (
 	"fmt"
-	"net"
 	"net/url"
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/oklog/ulid/v2"
 
 	"pocworkbench/internal/convert"
+	"pocworkbench/internal/engine"
 	"pocworkbench/internal/model"
 )
 
@@ -60,11 +61,16 @@ func hostOf(target string) string {
 var secretRe = regexp.MustCompile(`(?i)(password|passwd|token|secret|api[_-]?key)["']?\s*[:=]\s*\S+`)
 
 // sanitizeLog 落库前脱敏（方案 §六）。
+// 截断回退到 UTF-8 rune 边界，中文日志不在边界处产出乱码尾巴。
 func sanitizeLog(log string) string {
 	log = secretRe.ReplaceAllString(log, `$1=***`)
 	const maxLog = 5 << 20
 	if len(log) > maxLog {
-		return log[:maxLog] + "\n...(truncated)"
+		cut := maxLog
+		for cut > 0 && !utf8.RuneStart(log[cut]) {
+			cut--
+		}
+		return log[:cut] + "\n...(truncated)"
 	}
 	return log
 }
@@ -84,16 +90,8 @@ func containsAny(list []string, needle string) bool {
 	return false
 }
 
-// checkTargetFormat 与引擎运行时校验规则一致，用于批量预筛。
+// checkTargetFormat 批量目标预筛。直接复用引擎运行时校验（engine.ValidateTarget），
+// 两端规则天然一致。
 func checkTargetFormat(transport, target string) bool {
-	if transport == "http" {
-		u, err := url.Parse(target)
-		return err == nil && (u.Scheme == "http" || u.Scheme == "https") && u.Host != ""
-	}
-	t := target
-	if i := strings.Index(t, "://"); i >= 0 {
-		t = t[i+3:]
-	}
-	host, _, err := net.SplitHostPort(t)
-	return err == nil && host != ""
+	return engine.ValidateTarget(transport, target) == nil
 }

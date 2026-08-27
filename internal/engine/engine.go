@@ -185,20 +185,8 @@ func (e *Engine) RunSink(ctx context.Context, spec *model.Spec, target, proxy st
 	}
 
 	// 按 transport 校验目标（http 须 http/https URL；tcp 须 host:port）
-	if spec.Transport == "http" {
-		u, err := url.Parse(target)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return RunResult{Result: "error", Log: "目标 URL 非法（须为 http/https 且 host 非空）"}
-		}
-	} else {
-		t := target
-		if i := strings.Index(t, "://"); i >= 0 {
-			t = t[i+3:]
-		}
-		host, _, err := net.SplitHostPort(t)
-		if err != nil || host == "" {
-			return RunResult{Result: "error", Log: "TCP 目标非法（须为 host:port）"}
-		}
+	if err := ValidateTarget(spec.Transport, target); err != nil {
+		return RunResult{Result: "error", Log: err.Error()}
 	}
 
 	states := map[string]*ruleState{}
@@ -271,6 +259,27 @@ func classifyCtx(parent, run context.Context) string {
 		return "timeout"
 	}
 	return "error"
+}
+
+// ValidateTarget 按 transport 校验目标格式：http 须 http/https URL；tcp 须 host:port。
+// 引擎运行时与批量预筛（checkTargetFormat）共用，两端规则天然一致。
+func ValidateTarget(transport, target string) error {
+	if transport == "http" {
+		u, err := url.Parse(target)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("目标 URL 非法（须为 http/https 且 host 非空）")
+		}
+		return nil
+	}
+	t := target
+	if i := strings.Index(t, "://"); i >= 0 {
+		t = t[i+3:]
+	}
+	host, _, err := net.SplitHostPort(t)
+	if err != nil || host == "" {
+		return fmt.Errorf("TCP 目标非法（须为 host:port）")
+	}
+	return nil
 }
 
 func (e *Engine) execRule(ctx context.Context, transport, name string, rule model.Rule, target, proxy string, started time.Time) (bool, string, error) {
