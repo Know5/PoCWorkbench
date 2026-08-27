@@ -373,13 +373,14 @@ func (a *App) RunTest(uid, target, proxy string, authorized bool) (int64, error)
 		if proxy != "" {
 			sink("proxy=" + proxy)
 		}
+		startedRFC := nowRFC() // goroutine 内即刻记录，勿在结束后取时间（否则与 EndedAt 几乎重合）
 		res := a.engine.RunSink(ctx, &p.Spec, target, proxy, sink)
 
 		host := hostOf(target)
 		tr := &model.TestRun{
 			PocUID: uid, Target: target, TargetHost: host,
 			Result: res.Result, Log: sanitizeLog(res.Log),
-			Authorized: authorized, StartedAt: nowRFC(), EndedAt: ptrNowRFC(),
+			Authorized: authorized, StartedAt: startedRFC, EndedAt: ptrNowRFC(),
 		}
 		id, err := a.store.InsertTestRun(tr)
 		if err == nil {
@@ -552,12 +553,13 @@ func (a *App) RunTestBatch(uid string, targets []string, proxy string, authorize
 			sink := func(line string) {
 				a.emit("batch:log", id, "["+strconv.Itoa(idx)+"] "+line)
 			}
+			startedRFC := nowRFC() // 每个目标在执行前记录开始时刻
 			res := a.engine.RunSink(ctx, &p.Spec, target, proxy, sink)
 
 			tr := &model.TestRun{
 				PocUID: uid, Target: target, TargetHost: hostOf(target),
 				Result: res.Result, Log: sanitizeLog(res.Log),
-				Authorized: authorized, StartedAt: nowRFC(), EndedAt: ptrNowRFC(),
+				Authorized: authorized, StartedAt: startedRFC, EndedAt: ptrNowRFC(),
 			}
 			if _, err := a.store.InsertTestRun(tr); err == nil {
 				if res.Result == "hit" || res.Result == "miss" {
