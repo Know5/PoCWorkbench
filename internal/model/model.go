@@ -142,10 +142,12 @@ type TestRun struct {
 	Target     string  `json:"target"`
 	TargetHost string  `json:"targetHost"`
 	Result     string  `json:"result"` // hit|miss|error|timeout|cancelled
-	Log        string  `json:"log"`
-	Authorized bool    `json:"authorized"`
-	StartedAt  string  `json:"startedAt"`
-	EndedAt    *string `json:"endedAt"`
+	Log        string  `json:"log"`    // 列表接口为截断预览（见 LogTruncated），GetTestRun 为全文
+	// LogTruncated 标记 Log 仅为预览；完整内容经 GetTestRun 懒加载
+	LogTruncated bool    `json:"logTruncated"`
+	Authorized   bool    `json:"authorized"`
+	StartedAt    string  `json:"startedAt"`
+	EndedAt      *string `json:"endedAt"`
 }
 
 // Dashboard 总览统计。

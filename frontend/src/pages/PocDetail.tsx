@@ -11,6 +11,8 @@ export default function PocDetail({ uid, onNav }: { uid: string; onNav: (r: Rout
   const [runs, setRuns] = useState<TestRun[]>([]);
   const [err, setErr] = useState("");
   const theme = useResolvedTheme();
+  // 列表接口只带日志预览；展开时按需拉取全文
+  const [fullLogs, setFullLogs] = useState<Record<number, string>>({});
 
   useEffect(() => {
     api.getPoc(uid).then(setPoc).catch((e: unknown) =>
@@ -18,6 +20,13 @@ export default function PocDetail({ uid, onNav }: { uid: string; onNav: (r: Rout
     );
     api.listTestRuns(uid).then((rs) => setRuns(rs ?? [])).catch(() => {});
   }, [uid]);
+
+  const loadFullLog = async (id: number) => {
+    try {
+      const t = await api.getTestRun(id);
+      if (t) setFullLogs((m) => ({ ...m, [id]: t.log }));
+    } catch { /* 拉取失败保留预览 */ }
+  };
 
   if (err) return <div className="text-[var(--danger)]">{err}</div>;
   if (!poc) return <div className="animate-pulse text-sm text-[var(--txt-dim)]">加载中…</div>;
@@ -151,8 +160,18 @@ export default function PocDetail({ uid, onNav }: { uid: string; onNav: (r: Rout
                 </span>
               </summary>
               <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-all border-t bg-[var(--bg-input)] p-4 text-xs leading-5 text-[var(--txt)]" style={{ borderColor: "var(--line)" }}>
-                {r.log}
+                {fullLogs[r.id] ?? r.log}
               </pre>
+              {r.logTruncated && fullLogs[r.id] === undefined && (
+                <div className="border-t px-4 py-2" style={{ borderColor: "var(--line)" }}>
+                  <button
+                    onClick={(e) => { e.preventDefault(); loadFullLog(r.id); }}
+                    className="text-[11px] text-[var(--accent)] hover:underline"
+                  >
+                    日志已截断，点击加载完整内容
+                  </button>
+                </div>
+              )}
             </details>
           ))}
         </div>

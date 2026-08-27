@@ -91,7 +91,7 @@ export interface Pwf { metadata: PwfMetadata; spec: PwfSpec; specRaw?: string }
 
 export interface TestRun {
   id: number; pocUid: string; target: string; targetHost: string;
-  result: string; log: string; authorized: boolean;
+  result: string; log: string; logTruncated?: boolean; authorized: boolean;
   startedAt: string; endedAt: string | null;
 }
 
@@ -158,6 +158,7 @@ export const api = {
     call<void>("CompileFinalExpr", final, ruleNames),
   cancelTest: (runId: number) => call<void>("CancelTest", runId),
   listTestRuns: (uid: string) => call<TestRun[]>("ListTestRuns", uid),
+  getTestRun: (id: number) => call<TestRun>("GetTestRun", id),
   exportPoc: (uid: string) => call<string>("ExportPoc", uid),
   dashboard: () => call<DashboardData>("Dashboard"),
   backupDB: () => call<string>("BackupDB"),

@@ -2,7 +2,9 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"pocworkbench/internal/model"
 )
@@ -219,6 +221,51 @@ func TestArchivedViewVisible(t *testing.T) {
 	_, total, _ = s.ListPocs(model.Filter{}, model.Page{Number: 1, Size: 10})
 	if total != 1 {
 		t.Fatalf("恢复后默认视图应可见: total=%d", total)
+	}
+}
+
+// 回归：列表接口此前整块直推全量日志（单条上限数 MB），会经 IPC 拖死前端。
+func TestListTestRunsLogPreview(t *testing.T) {
+	s := openTest(t)
+	mustInsert(t, s, "uid-1", draft("Poc A", specA), specA)
+
+	big := strings.Repeat("响应日志内容λ", 1500) // 约 11KB，含多字节 rune 触碰边界
+	id1, err := s.InsertTestRun(&model.TestRun{PocUID: "uid-1", Target: "http://big", Result: "hit",
+		Log: big, Authorized: true, StartedAt: nowRFC3339()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2, err := s.InsertTestRun(&model.TestRun{PocUID: "uid-1", Target: "http://small", Result: "miss",
+		Log: "short log", Authorized: true, StartedAt: nowRFC3339()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rs, err := s.ListTestRuns("uid-1")
+	if err != nil || len(rs) != 2 {
+		t.Fatalf("ListTestRuns 异常: %v %d", err, len(rs))
+	}
+	byID := map[int64]model.TestRun{}
+	for _, r := range rs {
+		byID[r.ID] = r
+	}
+	bigRow := byID[id1]
+	if !bigRow.LogTruncated || len(bigRow.Log) > logPreviewBytes+16 {
+		t.Fatalf("大日志应截断为预览: truncated=%v len=%d", bigRow.LogTruncated, len(bigRow.Log))
+	}
+	if !utf8.ValidString(bigRow.Log) {
+		t.Fatal("截断预览不应切断 UTF-8 rune")
+	}
+	if small := byID[id2]; small.LogTruncated || small.Log != "short log" {
+		t.Fatalf("短日志不应截断: %+v", small)
+	}
+
+	full, err := s.GetTestRun(id1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if full.Log != big || full.LogTruncated {
+		t.Fatalf("GetTestRun 应返回完整日志: len=%d truncated=%v", len(full.Log), full.LogTruncated)
 	}
 }
 

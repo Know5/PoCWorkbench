@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	_ "modernc.org/sqlite"
 
@@ -846,14 +847,19 @@ func (s *Store) InsertTestRun(r *model.TestRun) (int64, error) {
 	return res.LastInsertId()
 }
 
+// logPreviewBytes 列表接口单条日志预览上限（字节）。
+// 完整日志单条可达数 MB，列表 100 条直推前端会经 IPC 序列化出数百 MB 载荷卡死 WebView；
+// 预览 + GetTestRun 懒加载双段式。
+const logPreviewBytes = 4096
+
 func (s *Store) ListTestRuns(pocUID string) ([]model.TestRun, error) {
-	rows, err := s.db.Query(`SELECT id,poc_uid,target,target_host,result,log,authorized,started_at,ended_at
-		FROM test_run WHERE poc_uid=? ORDER BY id DESC LIMIT 100`, pocUID)
+	rows, err := s.db.Query(`SELECT id,poc_uid,target,target_host,result,substr(log,1,?),authorized,started_at,ended_at
+		FROM test_run WHERE poc_uid=? ORDER BY id DESC LIMIT 100`, logPreviewBytes+1, pocUID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanRuns(rows)
+	return scanRuns(rows, true)
 }
 
 func (s *Store) GetTestRun(id int64) (*model.TestRun, error) {
@@ -863,7 +869,7 @@ func (s *Store) GetTestRun(id int64) (*model.TestRun, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	runs, err := scanRuns(rows)
+	runs, err := scanRuns(rows, false)
 	if err != nil {
 		return nil, err
 	}
@@ -873,7 +879,7 @@ func (s *Store) GetTestRun(id int64) (*model.TestRun, error) {
 	return &runs[0], nil
 }
 
-func scanRuns(rows *sql.Rows) ([]model.TestRun, error) {
+func scanRuns(rows *sql.Rows, preview bool) ([]model.TestRun, error) {
 	var out []model.TestRun
 	for rows.Next() {
 		var r model.TestRun
@@ -883,6 +889,10 @@ func scanRuns(rows *sql.Rows) ([]model.TestRun, error) {
 			return nil, err
 		}
 		r.Authorized = auth != 0
+		if preview && len(r.Log) > logPreviewBytes {
+			r.Log = truncateAtRune(r.Log, logPreviewBytes)
+			r.LogTruncated = true
+		}
 		if ended.Valid {
 			e := ended.String
 			r.EndedAt = &e
@@ -890,6 +900,18 @@ func scanRuns(rows *sql.Rows) ([]model.TestRun, error) {
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// truncateAtRune 按字节上限截断并回退到 UTF-8 rune 边界，避免日志预览尾部乱码。
+func truncateAtRune(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	cut := n
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut]
 }
 
 // ---- 统计与备份 ----
