@@ -10,6 +10,8 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
   const [items, setItems] = useState<Summary[]>([]);
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
+  // 搜索输入防抖：每敲一键不再触发一次后端全量查询
+  const [queryInput, setQueryInput] = useState("");
   const [query, setQuery] = useState("");
   const [severity, setSeverity] = useState(initialSeverity);
   const [status, setStatus] = useState(initialStatus);
@@ -19,6 +21,11 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
   // 请求序号：筛选快速连续变化时丢弃过期响应
   const loadSeq = useRef(0);
   const size = 50;
+
+  useEffect(() => {
+    const t = setTimeout(() => { setQuery(queryInput); setPage(1); }, 300);
+    return () => clearTimeout(t);
+  }, [queryInput]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -63,8 +70,8 @@ export default function PocList({ onNav, initialStatus = "", initialSeverity = "
           <Search size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-[var(--txt-faint)]" />
           <input
             ref={searchRef}
-            value={query}
-            onChange={(e) => { setQuery(e.target.value); setPage(1); }}
+            value={queryInput}
+            onChange={(e) => setQueryInput(e.target.value)}
             placeholder="搜索名称 / CVE / 标签 / 描述…"
             className="h-[30px] w-full rounded-md border bg-transparent pl-8 pr-12 text-[13px] outline-none transition-colors duration-150 placeholder:text-[var(--txt-faint)] focus:border-[var(--accent-dim)]"
             style={borderStyle}

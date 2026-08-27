@@ -117,6 +117,22 @@ func TestSearchFTSAndLike(t *testing.T) {
 	if len(uids) != 1 || uids[0] != "uid-2" {
 		t.Errorf("多词检索失败: %v", uids)
 	}
+	// 回归：混合检索（FTS 长词 + 多个 LIKE 短词取交集），此前按候选×短词逐条 COUNT
+	uids, err = s.searchUIDs("未授权 rsync v", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uids) != 1 || uids[0] != "uid-2" {
+		t.Errorf("长词+短词交集失败: %v", uids)
+	}
+	// 短词不满足则候选归零
+	uids, err = s.searchUIDs("未授权 zz", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uids) != 0 {
+		t.Errorf("不相干短词应使交集为空: %v", uids)
+	}
 }
 
 func TestArchiveFilterAndDelete(t *testing.T) {

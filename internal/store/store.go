@@ -633,26 +633,48 @@ func (s *Store) searchUIDs(q string, includeArchived bool) ([]string, error) {
 	}
 
 	likeFilter := func(uids []string) ([]string, error) {
-		var out []string
-		for _, uid := range uids {
-			ok := true
-			for _, st := range short {
-				var hit int
-				pat := likePat(st)
-				err := s.db.QueryRow(`SELECT COUNT(1) FROM poc p WHERE p.uid=?
-					AND (p.name LIKE ? ESCAPE '\' OR p.description LIKE ? ESCAPE '\' OR p.aliases LIKE ? ESCAPE '\' OR p.tags LIKE ? ESCAPE '\')`,
-					uid, pat, pat, pat, pat).Scan(&hit)
-				if err != nil {
-					return nil, err
-				}
-				if hit == 0 {
-					ok = false
-					break
+		if len(uids) == 0 || len(short) == 0 {
+			return uids, nil
+		}
+		// 每个短词一条 SQL（uid IN 限定到候选集），Go 内取交集。
+		// 此前对 候选×短词 逐条发 COUNT，宽泛搜索时是语句风暴。
+		pool := make(map[string]struct{}, len(uids))
+		for _, u := range uids {
+			pool[u] = struct{}{}
+		}
+		for _, st := range short {
+			if len(pool) == 0 {
+				return nil, nil
+			}
+			uidsLeft := make([]string, 0, len(pool))
+			for u := range pool {
+				uidsLeft = append(uidsLeft, u)
+			}
+			ph := strings.TrimRight(strings.Repeat("?,", len(uidsLeft)), ",")
+			pat := likePat(st)
+			qargs := append(toAny(uidsLeft), pat, pat, pat, pat)
+			rows, err := s.db.Query(`SELECT DISTINCT p.uid FROM poc p WHERE p.uid IN (`+ph+`)
+				AND (p.name LIKE ? ESCAPE '\' OR p.description LIKE ? ESCAPE '\' OR p.aliases LIKE ? ESCAPE '\' OR p.tags LIKE ? ESCAPE '\')`,
+				qargs...)
+			if err != nil {
+				return nil, err
+			}
+			next := map[string]struct{}{}
+			for rows.Next() {
+				var uid string
+				if err := rows.Scan(&uid); err == nil {
+					next[uid] = struct{}{}
 				}
 			}
-			if ok {
-				out = append(out, uid)
+			rows.Close()
+			if err := rows.Err(); err != nil {
+				return nil, err
 			}
+			pool = next
+		}
+		out := make([]string, 0, len(pool))
+		for u := range pool {
+			out = append(out, u)
 		}
 		return out, nil
 	}
