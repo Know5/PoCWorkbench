@@ -126,6 +126,7 @@ export const api = {
   appVersion: () => call<string>("AppVersion"),
   startupError: () => call<string>("StartupError"),
   convertXray: (yamlText: string) => call<Draft>("ConvertXray", yamlText),
+  convertTemplate: (yamlText: string) => call<Draft>("ConvertTemplate", yamlText),
   createPoc: (d: Draft) => call<string>("CreatePoc", d),
   updatePocSpec: (uid: string, specYaml: string) => call<void>("UpdatePocSpec", uid, specYaml),
   updatePocMeta: (uid: string, d: Draft) => call<void>("UpdatePocMeta", uid, d),

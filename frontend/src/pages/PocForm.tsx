@@ -157,7 +157,7 @@ export default function PocForm({ mode, uid, onNav }: {
   const doConvert = async () => {
     setErr(""); setBusy(true);
     try {
-      const d = await api.convertXray(xrayText);
+      const d = await api.convertTemplate(xrayText);
       setDraft(d);
       setWarnings(d.warnings ?? []);
       const ui = loadSpecToUI(d.specYaml);
@@ -230,7 +230,7 @@ export default function PocForm({ mode, uid, onNav }: {
       {mode === "create" && (
         <div className="inline-flex rounded-xl border p-1" style={{ borderColor: "var(--line)", background: "var(--bg-panel)" }}>
           <SegTab active={tab === "paste"} onClick={() => setTab("paste")} icon={<ClipboardPaste size={14} strokeWidth={1.9} />}>
-            粘贴 Xray 转换
+            粘贴模板转换
           </SegTab>
           <SegTab active={tab === "manual"} onClick={() => setTab("manual")} icon={<PenLine size={14} strokeWidth={1.9} />}>
             手动创建
@@ -241,7 +241,7 @@ export default function PocForm({ mode, uid, onNav }: {
       {tab === "paste" && mode === "create" && (
         <div className="max-w-4xl space-y-3">
           <p className="text-[13px] text-[var(--txt-dim)]">
-            粘贴完整 Xray 格式 YAML（上限 256KB），解析后进入下方表单确认入库。
+            粘贴完整 Xray 或 Nuclei 模板 YAML（自动识别格式，上限 256KB），解析后进入下方表单确认入库。
           </p>
           <CodeMirror value={xrayText} onChange={setXrayText} extensions={[yaml()]} theme={cmTheme} height="320px" />
           <button onClick={doConvert} disabled={busy || !xrayText.trim()}

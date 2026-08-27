@@ -15,13 +15,20 @@ import (
 	"pocworkbench/internal/model"
 )
 
-func convertXraySafe(yamlText string) (d *model.Draft, err error) {
+// withParseRecover 统一捕获外部 YAML 解析器的 panic，转为常规错误。
+func withParseRecover[T any](fn func() (T, error)) (out T, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("解析 panic: %v", r)
 		}
 	}()
-	return convert.XrayToDraft(yamlText)
+	return fn()
+}
+
+func convertXraySafe(yamlText string) (*model.Draft, error) {
+	return withParseRecover(func() (*model.Draft, error) {
+		return convert.XrayToDraft(yamlText)
+	})
 }
 
 func strings_Blank(s string) bool { return strings.TrimSpace(s) == "" }

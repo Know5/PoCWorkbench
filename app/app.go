@@ -16,6 +16,7 @@ import (
 	"time"
 
 	yml "gopkg.in/yaml.v3"
+	"pocworkbench/internal/convert"
 	"pocworkbench/internal/engine"
 	"pocworkbench/internal/model"
 	"pocworkbench/internal/pwf"
@@ -136,6 +137,22 @@ func (a *App) ConvertXray(yamlText string) (*model.Draft, error) {
 		return nil, fmt.Errorf("输入超过 256KB 上限")
 	}
 	return convertXraySafe(yamlText)
+}
+
+// ConvertTemplate 自动识别 Xray / Nuclei 模板并转换为 PWF 草稿（不落库）。
+// source 字段标记实际命中的格式；无法识别时显式报错。
+func (a *App) ConvertTemplate(yamlText string) (*model.Draft, error) {
+	if len(yamlText) > 256<<10 {
+		return nil, fmt.Errorf("输入超过 256KB 上限")
+	}
+	switch convert.DetectFormat(yamlText) {
+	case convert.FormatNuclei:
+		return withParseRecover(func() (*model.Draft, error) { return convert.NucleiToDraft(yamlText) })
+	case convert.FormatXray:
+		return withParseRecover(func() (*model.Draft, error) { return convert.XrayToDraft(yamlText) })
+	default:
+		return nil, fmt.Errorf("无法识别模板格式（支持 Xray 与 Nuclei，请检查粘贴内容）")
+	}
 }
 
 // CreatePoc 三关校验后入库，返回 uid。

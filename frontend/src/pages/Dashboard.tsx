@@ -29,7 +29,7 @@ export default function Dashboard({ onNav }: { onNav: (r: Route) => void }) {
           <div>
             <h1 className="text-base font-semibold text-[var(--txt)]">PoC 库还是空的</h1>
             <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--txt-dim)]">
-              从现有 Xray 模板一键转换导入，或手动逐项创建。
+              从现有 Xray / Nuclei 模板一键转换导入（自动识别格式），或手动逐项创建。
               <br />
               所有数据存储在本地 SQLite，格式统一为 PWF。
             </p>
@@ -39,7 +39,7 @@ export default function Dashboard({ onNav }: { onNav: (r: Route) => void }) {
               onClick={() => onNav({ page: "create" })}
               className="flex h-9 items-center gap-1.5 rounded-lg bg-[var(--accent)] px-4 text-[13px] font-medium text-white transition-colors duration-150 hover:brightness-110"
             >
-              <ClipboardPaste size={14} strokeWidth={2} /> 粘贴 Xray 导入
+              <ClipboardPaste size={14} strokeWidth={2} /> 粘贴模板导入
             </button>
             <button
               onClick={() => onNav({ page: "create" })}
