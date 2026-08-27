@@ -5,6 +5,7 @@ import { yaml } from "@codemirror/lang-yaml";
 import { api, sevColor, statusColor, type Pwf, type TestRun } from "../api";
 import ConfirmDialog from "../components/ConfirmDialog";
 import { useResolvedTheme } from "../theme";
+import { dump as yamlDump } from "js-yaml";
 import type { Route } from "../App";
 
 export default function PocDetail({ uid, onNav }: { uid: string; onNav: (r: Route) => void }) {
@@ -144,7 +145,7 @@ export default function PocDetail({ uid, onNav }: { uid: string; onNav: (r: Rout
         <CodeMirror
           value={m.kind === "script"
             ? (poc.specRaw ?? "")
-            : JSON.stringify(poc.spec, null, 2)}
+            : yamlDump(poc.spec, { lineWidth: -1 })}
           extensions={[yaml()]}
           editable={false}
           theme={theme}
