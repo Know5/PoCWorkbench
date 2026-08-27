@@ -162,6 +162,8 @@ export const api = {
   exportPoc: (uid: string) => call<string>("ExportPoc", uid),
   dashboard: () => call<DashboardData>("Dashboard"),
   backupDB: () => call<string>("BackupDB"),
+  pickRestoreFile: () => call<string>("PickRestoreFile"),
+  restoreBackup: (path: string) => call<void>("RestoreBackup", path),
 
   onTestLog: (cb: (runId: number, line: string) => void) => {
     wailsRuntime()?.EventsOn("test:log", (...data: unknown[]) => {

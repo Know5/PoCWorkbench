@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Save, AlertTriangle, DatabaseBackup, Gauge, Check, SunMoon } from "lucide-react";
+import { Save, AlertTriangle, DatabaseBackup, Gauge, Check, SunMoon, Undo2 } from "lucide-react";
 import { api } from "../api";
 import { getPref, applyTheme, type ThemePref } from "../theme";
 
@@ -19,6 +19,22 @@ export default function Settings() {
     try {
       const p = await api.backupDB();
       setMsg(p);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const doRestore = async () => {
+    setMsg(""); setErr("");
+    try {
+      const p = await api.pickRestoreFile();
+      if (!p) return; // 用户取消选择
+      if (!window.confirm(`确认用该备份覆盖当前数据库？\n\n${p}\n\n进行中的测试将被取消，恢复成功后页面自动刷新。`)) return;
+      setBusy(true);
+      await api.restoreBackup(p);
+      window.location.reload(); // 全量加载恢复后的数据
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
     } finally {
@@ -58,12 +74,19 @@ export default function Settings() {
           <span className="text-[11px] font-medium text-[var(--txt-dim)]">数据备份</span>
         </div>
         <p className="text-[13px] leading-relaxed text-[var(--txt-dim)]">
-          使用 SQLite VACUUM INTO 生成带时间戳的备份文件，WAL 模式下保证一致性。
+          使用 SQLite VACUUM INTO 生成带时间戳的备份文件，WAL 模式下保证一致性；自动保留最近 10 份。
         </p>
-        <button onClick={doBackup} disabled={busy}
-          className="flex h-8 items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-[13px] font-medium text-white transition-colors duration-150 hover:brightness-110 disabled:opacity-40">
-          <Save size={14} strokeWidth={2} /> 一键备份
-        </button>
+        <div className="flex items-center gap-2.5">
+          <button onClick={doBackup} disabled={busy}
+            className="flex h-8 items-center gap-2 rounded-lg bg-[var(--accent)] px-4 text-[13px] font-medium text-white transition-colors duration-150 hover:brightness-110 disabled:opacity-40">
+            <Save size={14} strokeWidth={2} /> 一键备份
+          </button>
+          <button onClick={doRestore} disabled={busy}
+            className="flex h-8 items-center gap-2 rounded-lg border border-[var(--warn)]/40 px-4 text-[13px] text-[var(--warn)] transition-colors duration-150 hover:bg-[var(--warn)]/10 disabled:opacity-40"
+            style={{ background: "rgba(255,149,0,0.05)" }}>
+            <Undo2 size={14} strokeWidth={2} /> 从备份恢复…
+          </button>
+        </div>
         {msg && (
           <div className="flex items-center gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.07] p-2.5 text-[13px] text-emerald-600 dark:text-emerald-400">
             <Check size={14} /> 已备份到：<span className="font-mono-data text-xs">{msg}</span>

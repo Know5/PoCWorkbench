@@ -2,11 +2,14 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
+	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -70,15 +73,11 @@ func (a *App) Startup(ctx context.Context) (err error) {
 	a.SetEmitter(func(event string, data ...any) {
 		runtime.EventsEmit(ctx, event, data...)
 	})
-	dir, err := os.UserConfigDir()
-	if err != nil {
-		dir = "."
-	}
-	dbDir := filepath.Join(dir, "PoCWorkbench")
-	if err := os.MkdirAll(dbDir, 0o755); err != nil {
+	dir := userDBDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return err
 	}
-	s, err := store.Open(filepath.Join(dbDir, "pocwb.db"))
+	s, err := store.Open(filepath.Join(dir, "pocwb.db"))
 	if err != nil {
 		return err
 	}
@@ -94,6 +93,15 @@ func (a *App) AppVersion() string { return Version }
 func (a *App) StartupError() string { return a.startupErr }
 
 func (a *App) Shutdown() {
+	a.cancelAllRuns()
+	if a.store != nil {
+		a.store.Close()
+	}
+}
+
+// cancelAllRuns 取消全部进行中/排队的测试任务，并有限等待其落库完成。
+// Shutdown 与 RestoreBackup（替换数据库前必须停写）共用。
+func (a *App) cancelAllRuns() {
 	a.cancelMu.Lock()
 	for _, c := range a.batchCancels {
 		c()
@@ -102,7 +110,6 @@ func (a *App) Shutdown() {
 		c()
 	}
 	a.cancelMu.Unlock()
-	// 有界等待在跑任务落库：正常秒级完成；极端卡死时不无限拖住进程退出（最多 10s）
 	done := make(chan struct{})
 	go func() {
 		a.runsWG.Wait()
@@ -111,9 +118,6 @@ func (a *App) Shutdown() {
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-	}
-	if a.store != nil {
-		a.store.Close()
 	}
 }
 
@@ -459,21 +463,185 @@ func (a *App) Dashboard() (*model.Dashboard, error) {
 	return a.store.Dashboard()
 }
 
-// BackupDB 备份到用户配置目录，返回备份文件路径。
-func (a *App) BackupDB() (string, error) {
-	if err := a.requireStore(); err != nil {
-		return "", err
-	}
+// backupKeep 备份保留份数：超出最新 N 份的旧备份在每次备份后清理。
+const backupKeep = 10
+
+func userDBDir() string {
 	dir, err := os.UserConfigDir()
 	if err != nil {
 		dir = "."
 	}
-	dest := filepath.Join(dir, "PoCWorkbench",
+	return filepath.Join(dir, "PoCWorkbench")
+}
+
+// BackupDB 备份到用户配置目录，返回备份文件路径；随后清理超出保留份数的旧备份。
+func (a *App) BackupDB() (string, error) {
+	if err := a.requireStore(); err != nil {
+		return "", err
+	}
+	dest := filepath.Join(userDBDir(),
 		fmt.Sprintf("pocwb-backup-%s.db", time.Now().Format("20060102-150405")))
 	if err := a.store.BackupDB(dest); err != nil {
 		return "", err
 	}
+	pruneBackups(userDBDir())
 	return dest, nil
+}
+
+// pruneBackups 按 mtime 倒序保留最新 backupKeep 份备份，其余删除（删除失败静默，不影响主流程）。
+func pruneBackups(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	type backupFile struct{ path string; mod time.Time }
+	var bks []backupFile
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasPrefix(name, "pocwb-backup-") || !strings.HasSuffix(name, ".db") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		bks = append(bks, backupFile{filepath.Join(dir, name), info.ModTime()})
+	}
+	sort.Slice(bks, func(i, j int) bool { return bks[i].mod.After(bks[j].mod) })
+	for i := backupKeep; i < len(bks); i++ {
+		_ = os.Remove(bks[i].path)
+	}
+}
+
+// PickRestoreFile 弹出系统文件选择框选取备份文件；取消返回空串。
+func (a *App) PickRestoreFile() (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("应用尚未初始化完成")
+	}
+	return runtime.OpenFileDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择备份文件",
+		Filters: []runtime.FileFilter{
+			{DisplayName: "SQLite 数据库 (*.db)", Pattern: "*.db"},
+		},
+	})
+}
+
+// RestoreBackup 用备份文件替换当前数据库并重新打开。进行中的测试将被取消。
+// 流程：文件头与可开性校验（在临时副本上）→ 现库改名留档 → 覆盖 → 重开；
+// 重开失败自动回退到原库。成功后前端刷新页面加载新数据。
+func (a *App) RestoreBackup(path string) error {
+	if err := a.requireStore(); err != nil {
+		return err
+	}
+	dbPath := filepath.Join(userDBDir(), "pocwb.db")
+
+	// 文件头校验：拒绝任意非 SQLite 文件顶替
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("无法读取备份文件: %w", err)
+	}
+	if info.Size() < 100 {
+		return fmt.Errorf("备份文件过小，不是有效的 SQLite 库")
+	}
+	hdr := make([]byte, 16)
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("无法读取备份文件: %w", err)
+	}
+	n, _ := io.ReadFull(f, hdr)
+	_ = f.Close()
+	if n != 16 || !bytes.Equal(hdr, []byte("SQLite format 3\x00")) {
+		return fmt.Errorf("文件头不符合 SQLite 格式，拒绝恢复")
+	}
+	// 在临时副本上完整打开验证（迁移只发生在副本上），确认核心表可用
+	if err := verifySQLiteCopy(path); err != nil {
+		return fmt.Errorf("备份验证失败: %w", err)
+	}
+
+	// 停写并等待在跑任务落库，避免覆盖时丢数据或锁冲突
+	a.cancelAllRuns()
+
+	pre := dbPath + ".pre-restore"
+	_ = os.Remove(pre)
+	if err := a.store.Close(); err != nil {
+		return fmt.Errorf("关闭当前数据库失败: %w", err)
+	}
+	renameFailed := false
+	if err := os.Rename(dbPath, pre); err != nil {
+		if !os.IsNotExist(err) {
+			renameFailed = true
+		}
+	}
+	if renameFailed {
+		if s2, oe := store.Open(dbPath); oe == nil {
+			a.store = s2 // 尽力回到原现场
+		} else {
+			a.startupErr = "数据库重开失败: " + oe.Error()
+		}
+		return fmt.Errorf("预留当前数据库失败: %w", err)
+	}
+	if err := copyFile(path, dbPath); err != nil {
+		os.Remove(dbPath)
+		_ = os.Rename(pre, dbPath)
+		if s2, oe := store.Open(dbPath); oe == nil {
+			a.store = s2
+		} else {
+			a.startupErr = "数据库重开失败: " + oe.Error()
+		}
+		return fmt.Errorf("写入新数据库失败: %w", err)
+	}
+	s2, err := store.Open(dbPath)
+	if err != nil {
+		// 新库打不开：回退原库
+		os.Remove(dbPath)
+		_ = os.Rename(pre, dbPath)
+		if s3, oe := store.Open(dbPath); oe == nil {
+			a.store = s3
+			return fmt.Errorf("恢复后的数据库无法打开（已回退原库）: %w", err)
+		}
+		a.startupErr = "数据库重开失败: " + err.Error()
+		return fmt.Errorf("恢复后的数据库无法打开且回退失败: %w", err)
+	}
+	a.store = s2
+	_ = os.Remove(pre)
+	a.emit("db:restored")
+	return nil
+}
+
+// verifySQLiteCopy 把候选备份拷贝到临时目录并完整打开+健康检查，验证其确实可用。
+func verifySQLiteCopy(src string) error {
+	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("pocwb-verify-%d.db", time.Now().UnixNano()))
+	defer func() {
+		_ = os.Remove(tmp)
+		_ = os.Remove(tmp + "-wal")
+		_ = os.Remove(tmp + "-shm")
+	}()
+	if err := copyFile(src, tmp); err != nil {
+		return err
+	}
+	vs, err := store.Open(tmp) // 迁移只在副本上执行，不触碰原备份
+	if err != nil {
+		return err
+	}
+	defer vs.Close()
+	return vs.HealthCheck()
+}
+
+func copyFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		_ = out.Close()
+		return err
+	}
+	return out.Close()
 }
 
 // ── 批量测试：单 PoC × 多目标 ─────────────────────────

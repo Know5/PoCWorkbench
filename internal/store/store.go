@@ -992,3 +992,9 @@ func (s *Store) BackupDB(destPath string) error {
 	_, err := s.db.Exec(`VACUUM INTO ?`, destPath)
 	return err
 }
+
+// HealthCheck 验证核心表可查询（恢复前校验备份可用性）。
+func (s *Store) HealthCheck() error {
+	var n int
+	return s.db.QueryRow(`SELECT COUNT(1) FROM poc`).Scan(&n)
+}
