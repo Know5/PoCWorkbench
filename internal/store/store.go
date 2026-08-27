@@ -53,9 +53,15 @@ func (s *Store) init() error {
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
 		return err
 	}
+	// 迁移按版本号顺序执行；新版本一律追加（IF NOT EXISTS 幂等），老库依次升级
 	if ver < 1 {
 		if err := s.migrateV1(); err != nil {
 			return fmt.Errorf("migrate v1: %w", err)
+		}
+	}
+	if ver < 2 {
+		if err := s.migrateV2(); err != nil {
+			return fmt.Errorf("migrate v2: %w", err)
 		}
 	}
 	return nil
@@ -122,6 +128,16 @@ CREATE VIRTUAL TABLE IF NOT EXISTS poc_fts USING fts5(
 		return err
 	}
 	_, err := s.db.Exec(`PRAGMA user_version = 1`)
+	return err
+}
+
+// migrateV2 v1.0.1：test_run.poc_uid 无索引，SQLite 不会因 FK 声明自动建索引——
+// 测试历史查询与 CASCADE 删除都随记录增长退化为全表扫描。
+func (s *Store) migrateV2() error {
+	if _, err := s.db.Exec(`CREATE INDEX IF NOT EXISTS idx_test_run_poc ON test_run(poc_uid, id)`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`PRAGMA user_version = 2`)
 	return err
 }
 

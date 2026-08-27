@@ -222,6 +222,48 @@ func TestArchivedViewVisible(t *testing.T) {
 	}
 }
 
+// 回归：test_run.poc_uid 缺索引；同时验证老库升级到 v2 后重开不报错（迁移幂等）。
+func TestMigrateV2TestRunIndex(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "test.db")
+	s, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustInsert(t, s, "uid-1", draft("Poc A", specA), specA)
+
+	indexExists := func() bool {
+		var n int
+		err := s.db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name='idx_test_run_poc'`).Scan(&n)
+		return err == nil && n == 1
+	}
+	if !indexExists() {
+		t.Fatal("v2 迁移应创建 idx_test_run_poc")
+	}
+	var ver int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil || ver < 2 {
+		t.Fatalf("user_version 应 >= 2: %d err=%v", ver, err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重开同一库：迁移不应重复执行或报错，数据与索引保持
+	s2, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	items, total, err := s2.ListPocs(model.Filter{}, model.Page{Number: 1, Size: 10})
+	if err != nil || total != 1 || len(items) != 1 {
+		t.Fatalf("重开后数据应完好: items=%v total=%d err=%v", items, total, err)
+	}
+	// 借用 s2 句柄再查一次索引存在性
+	var n int
+	if err := s2.db.QueryRow(`SELECT COUNT(1) FROM sqlite_master WHERE type='index' AND name='idx_test_run_poc'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("重开后索引应仍在: n=%d err=%v", n, err)
+	}
+}
+
 func TestGetPocRoundTrip(t *testing.T) {
 	s := openTest(t)
 	mustInsert(t, s, "uid-1", draft("Poc A", specA), specA)
