@@ -25,7 +25,10 @@ type Store struct {
 }
 
 func Open(path string) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)")
+	// foreign_keys 走 DSN 而非 init() 里的一次性 Exec：该 pragma 是连接级的，
+	// 若 database/sql 因坏连接丢弃并重建连接，Exec 设的值会静默失效，
+	// 之后的 ON DELETE RESTRICT / CASCADE 都不再生效。DSN 对每条新连接都生效。
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, err
 	}
@@ -41,14 +44,9 @@ func Open(path string) (*Store, error) {
 func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) init() error {
-	stmts := []string{
-		`PRAGMA journal_mode = WAL`,
-		`PRAGMA foreign_keys = ON`,
-	}
-	for _, q := range stmts {
-		if _, err := s.db.Exec(q); err != nil {
-			return fmt.Errorf("pragma: %w", err)
-		}
+	// journal_mode=WAL 持久化在库文件里，设一次即可；foreign_keys 见 Open 的 DSN
+	if _, err := s.db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+		return fmt.Errorf("pragma: %w", err)
 	}
 	var ver int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&ver); err != nil {
@@ -678,6 +676,15 @@ func (s *Store) buildWhere(f model.Filter) (string, []any, error) {
 	return strings.Join(conds, " AND "), args, nil
 }
 
+// likeFields 短词 LIKE 分支的检索字段，与 poc_fts 的索引列保持一致。
+// 必须含 vendor / product：FTS 索引了它们，而 LIKE 分支曾只查 poc 表自身列，
+// 导致「华为」「用友」这类两字厂商名（<3 字符走不到 FTS）根本搜不出来，
+// 且长词+短词组合会被短词过滤误杀成 0 结果。占位符顺序与 6 个 pat 参数对应。
+const likeFields = `p.name LIKE ? ESCAPE '\' OR p.description LIKE ? ESCAPE '\'
+	OR p.aliases LIKE ? ESCAPE '\' OR p.tags LIKE ? ESCAPE '\'
+	OR IFNULL(v.canonical_name,'') LIKE ? ESCAPE '\'
+	OR IFNULL(pr.canonical_name,'') LIKE ? ESCAPE '\'`
+
 // searchUIDs 混合检索：≥3 字符词走 FTS trigram，<3 字符词 LIKE 回退，取交集。
 // includeArchived 控制纯短词 LIKE 分支是否包含已归档行（与列表状态筛选保持一致）。
 func (s *Store) searchUIDs(q string, includeArchived bool) ([]string, error) {
@@ -732,9 +739,11 @@ func (s *Store) searchUIDs(q string, includeArchived bool) ([]string, error) {
 			}
 			ph := strings.TrimRight(strings.Repeat("?,", len(uidsLeft)), ",")
 			pat := likePat(st)
-			qargs := append(toAny(uidsLeft), pat, pat, pat, pat)
-			rows, err := s.db.Query(`SELECT DISTINCT p.uid FROM poc p WHERE p.uid IN (`+ph+`)
-				AND (p.name LIKE ? ESCAPE '\' OR p.description LIKE ? ESCAPE '\' OR p.aliases LIKE ? ESCAPE '\' OR p.tags LIKE ? ESCAPE '\')`,
+			qargs := append(toAny(uidsLeft), pat, pat, pat, pat, pat, pat)
+			rows, err := s.db.Query(`SELECT DISTINCT p.uid FROM poc p
+				LEFT JOIN vendor v ON p.vendor_id=v.id
+				LEFT JOIN product pr ON p.product_id=pr.id
+				WHERE p.uid IN (`+ph+`) AND (`+likeFields+`)`,
 				qargs...)
 			if err != nil {
 				return nil, err
@@ -772,9 +781,11 @@ func (s *Store) searchUIDs(q string, includeArchived bool) ([]string, error) {
 			statusCond = `1=1`
 		}
 		pat := likePat(short[0])
-		rows, err := s.db.Query(`SELECT p.uid FROM poc p WHERE `+statusCond+`
-			AND (p.name LIKE ? ESCAPE '\' OR p.description LIKE ? ESCAPE '\' OR p.aliases LIKE ? ESCAPE '\' OR p.tags LIKE ? ESCAPE '\')`,
-			pat, pat, pat, pat)
+		rows, err := s.db.Query(`SELECT p.uid FROM poc p
+			LEFT JOIN vendor v ON p.vendor_id=v.id
+			LEFT JOIN product pr ON p.product_id=pr.id
+			WHERE `+statusCond+` AND (`+likeFields+`)`,
+			pat, pat, pat, pat, pat, pat)
 		if err != nil {
 			return nil, err
 		}
@@ -1032,7 +1043,13 @@ func (s *Store) Dashboard() (*model.Dashboard, error) {
 			return nil, err
 		}
 		d.ByStatus[k] = n
-		d.TotalPocs += n
+		// TotalPocs 与 BySeverity/TopVendors 同口径（不含归档），三者可对账；
+		// 此前把归档一并累加，首页头部数字与下方分布图恒不相符
+		if k == "archived" {
+			d.ArchivedPocs = n
+		} else {
+			d.TotalPocs += n
+		}
 	}
 	rows.Close()
 

@@ -137,12 +137,12 @@ type Product struct {
 // ---- 测试 ----
 
 type TestRun struct {
-	ID         int64   `json:"id"`
-	PocUID     string  `json:"pocUid"`
-	Target     string  `json:"target"`
-	TargetHost string  `json:"targetHost"`
-	Result     string  `json:"result"` // hit|miss|error|timeout|cancelled
-	Log        string  `json:"log"`    // 列表接口为截断预览（见 LogTruncated），GetTestRun 为全文
+	ID         int64  `json:"id"`
+	PocUID     string `json:"pocUid"`
+	Target     string `json:"target"`
+	TargetHost string `json:"targetHost"`
+	Result     string `json:"result"` // hit|miss|error|timeout|cancelled
+	Log        string `json:"log"`    // 列表接口为截断预览（见 LogTruncated），GetTestRun 为全文
 	// LogTruncated 标记 Log 仅为预览；完整内容经 GetTestRun 懒加载
 	LogTruncated bool    `json:"logTruncated"`
 	Authorized   bool    `json:"authorized"`
@@ -151,12 +151,17 @@ type TestRun struct {
 }
 
 // Dashboard 总览统计。
+// 口径约定：TotalPocs / BySeverity / TopVendors 一律不含归档，三者可互相对账；
+// ByStatus 是状态分布，完整含归档；归档数单独由 ArchivedPocs 给出。
 type Dashboard struct {
-	ByStatus      map[string]int64 `json:"byStatus"`
-	BySeverity    map[string]int64 `json:"bySeverity"`
-	TopVendors    []VendorCount    `json:"topVendors"`
-	TotalPocs     int64            `json:"totalPocs"`
-	TotalTestRuns int64            `json:"totalTestRuns"`
+	ByStatus   map[string]int64 `json:"byStatus"`
+	BySeverity map[string]int64 `json:"bySeverity"`
+	TopVendors []VendorCount    `json:"topVendors"`
+	// TotalPocs 未归档 PoC 数（与 BySeverity 之和相等）
+	TotalPocs int64 `json:"totalPocs"`
+	// ArchivedPocs 已归档数——供前端区分「空库」与「全部已归档」
+	ArchivedPocs  int64 `json:"archivedPocs"`
+	TotalTestRuns int64 `json:"totalTestRuns"`
 }
 
 type VendorCount struct {

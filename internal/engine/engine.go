@@ -200,6 +200,9 @@ func (e *Engine) RunSink(ctx context.Context, spec *model.Spec, target, proxy st
 			mu.Unlock()
 			rule := spec.Rules[name]
 			val, rlog, rerr := e.execRule(runCtx, spec.Transport, name, rule, target, proxy, started)
+			// 逐规则日志同样要过 sink：此前只写 logBuf，前端日志面板在整轮运行期间
+			// 一片空白，结束时才蹦出一行 [final]，长跑（默认硬超时 60s）看不到任何进展
+			emitLines(rlog, sink)
 			logBuf.WriteString(rlog)
 			mu.Lock()
 			st.done = true
@@ -249,6 +252,16 @@ func (e *Engine) RunSink(ctx context.Context, spec *model.Spec, target, proxy st
 	}
 	logf("[final] expression=%s => %v (%s)", finalSrc, hit, time.Since(started).Round(time.Millisecond))
 	return RunResult{Result: result, Log: logBuf.String()}
+}
+
+// emitLines 把多行日志块按行推给 sink（sink 的契约是单行、不含尾换行）。
+func emitLines(block string, sink func(string)) {
+	if sink == nil || block == "" {
+		return
+	}
+	for _, line := range strings.Split(strings.TrimRight(block, "\n"), "\n") {
+		sink(line)
+	}
 }
 
 func classifyCtx(parent, run context.Context) string {

@@ -19,6 +19,9 @@ export default function Dashboard({ onNav }: { onNav: (r: Route) => void }) {
   if (!data) return <div className="text-sm text-[var(--txt-dim)]">加载中…</div>;
 
   // ── 空状态：第一屏应该是引导，不是一堆零 ──
+  // totalPocs 不含归档，所以「全部已归档」也会走到这里——需与真空库区别对待，
+  // 否则用户看到「库还是空的」会以为数据丢了。
+  const archived = data.archivedPocs ?? 0;
   if ((data.totalPocs ?? 0) === 0) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -27,11 +30,23 @@ export default function Dashboard({ onNav }: { onNav: (r: Route) => void }) {
             <ShieldCheck size={30} strokeWidth={1.5} className="text-[var(--accent)]" />
           </div>
           <div>
-            <h1 className="text-base font-semibold text-[var(--txt)]">PoC 库还是空的</h1>
+            <h1 className="text-base font-semibold text-[var(--txt)]">
+              {archived > 0 ? "没有在用的 PoC" : "PoC 库还是空的"}
+            </h1>
             <p className="mt-1.5 text-[13px] leading-relaxed text-[var(--txt-dim)]">
-              从现有 Xray / Nuclei 模板一键转换导入（自动识别格式），或手动逐项创建。
-              <br />
-              所有数据存储在本地 SQLite，格式统一为 PWF。
+              {archived > 0 ? (
+                <>
+                  已归档 {archived} 个，可在列表筛选「已归档」查看并恢复。
+                  <br />
+                  也可以从 Xray / Nuclei 模板一键转换导入新的 PoC。
+                </>
+              ) : (
+                <>
+                  从现有 Xray / Nuclei 模板一键转换导入（自动识别格式），或手动逐项创建。
+                  <br />
+                  所有数据存储在本地 SQLite，格式统一为 PWF。
+                </>
+              )}
             </p>
           </div>
           <div className="flex justify-center gap-2.5">
@@ -61,7 +76,10 @@ export default function Dashboard({ onNav }: { onNav: (r: Route) => void }) {
     <div className="space-y-6">
       <div className="flex items-baseline gap-4 border-b pb-3" style={{ borderColor: "var(--line)" }}>
         <h1 className="text-base font-semibold text-[var(--txt)]">总览</h1>
-        <span className="tabular font-mono-data text-xs text-[var(--txt-dim)]">{data.totalPocs} 个 PoC</span>
+        <span className="tabular font-mono-data text-xs text-[var(--txt-dim)]">
+          {data.totalPocs} 个 PoC
+          {archived > 0 && <span className="text-[var(--txt-faint)]">（另有 {archived} 个已归档）</span>}
+        </span>
       </div>
 
       <div className="grid grid-cols-5 gap-px overflow-hidden rounded-lg border" style={{ borderColor: "var(--line)", background: "var(--line)" }}>

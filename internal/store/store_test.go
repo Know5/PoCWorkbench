@@ -526,7 +526,10 @@ func TestDeletePocRejectsNonArchived(t *testing.T) {
 // 回归：UpdateMeta 必须在同一事务内同步 poc 与 poc_fts。
 func TestUpdateMetaSyncsFts(t *testing.T) {
 	s := openTest(t)
-	mustInsert(t, s, "uid-1", draft("Poc A", specA), specA)
+	// 旧名取一个不与新名、厂商、产品重叠的独特词：
+	// 原用例查 "Poc A" 判定「旧名已消失」，但 "Poc" 是新名的子串、
+	// "A" 又是单字符（会命中 product "XWiki Platform"），验不到真正想验的东西。
+	mustInsert(t, s, "uid-1", draft("ZZQQ旧名称", specA), specA)
 
 	d := draft("改名后的PoC", specA)
 	d.Vendor = "XWiki"
@@ -537,7 +540,7 @@ func TestUpdateMetaSyncsFts(t *testing.T) {
 	if items, _ := searchAll(t, s, "改名后的PoC"); len(items) != 1 {
 		t.Fatal("新名称应能被 FTS 命中")
 	}
-	if items, _ := searchAll(t, s, "Poc A"); len(items) != 0 {
+	if items, _ := searchAll(t, s, "ZZQQ旧名称"); len(items) != 0 {
 		t.Fatal("旧名称不应再被 FTS 命中")
 	}
 }

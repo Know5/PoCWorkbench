@@ -106,11 +106,16 @@ export interface BatchResultRow {
 /** 批量任务启动返回：batchID 与预检剔除的非法目标 */
 export interface BatchStart { id: string; invalid: string[] }
 
+/**
+ * 口径：totalPocs / bySeverity / topVendors 均不含归档，三者可互相对账；
+ * byStatus 为完整状态分布（含 archived）；archivedPocs 单列归档数。
+ */
 export interface DashboardData {
   byStatus: Record<string, number>;
   bySeverity: Record<string, number>;
   topVendors: { vendor: string; count: number }[];
   totalPocs: number;
+  archivedPocs: number;
   totalTestRuns: number;
 }
 
