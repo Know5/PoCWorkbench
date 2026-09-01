@@ -240,12 +240,140 @@ func ValidateSpec(specYAML string) (canonicalYAML string, err error) {
 		return "", e
 	}
 
+	// 关四（v1.2 串联）：extract 正则合法 + 变量引用闭环 + 依赖无环
+	if e := validateExtracts(&spec); e != nil {
+		return "", e
+	}
+
 	// 规范化序列化（键序稳定）→ 哈希基底
 	canonical, e := MarshalCanonical(&spec)
 	if e != nil {
 		return "", fmt.Errorf("规范化序列化失败: %w", e)
 	}
 	return canonical, nil
+}
+
+// ---- 变量提取与串联（v1.2）----
+
+// VarRefRe 揜取规则请求文本（path/headers/body/inputs）中的 {{变量名}} 引用。
+// 变量名字符集与 rule 名一致；不允许 {{}} 空引用（那是字面量歧义，直接拒绝更安全）。
+var VarRefRe = regexp.MustCompile(`\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}`)
+
+// ExtractFrom 依声明的变量名集合，返回文本中实际引用的变量名（不去重、保序）。
+// 引擎运行期与保存期校验共用同一实现，保证"保存时认得的引用，运行时一定认得"。
+func ExtractFrom(text string, declared map[string]bool) []string {
+	var out []string
+	for _, m := range VarRefRe.FindAllStringSubmatch(text, -1) {
+		if declared[m[1]] {
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// requestTexts 规则请求中允许出现 {{var}} 的全部字段。
+func requestTexts(spec *model.Spec, name string) []string {
+	r := spec.Rules[name]
+	texts := []string{r.Request.Path, r.Request.Body, r.Request.Method}
+	for _, v := range r.Request.Headers {
+		texts = append(texts, v)
+	}
+	for _, in := range r.Request.Inputs {
+		texts = append(texts, in.Data)
+	}
+	return texts
+}
+
+// validateExtracts 串联特性的保存期校验：
+//  1. 每个 extract 正则可编译且恰好 1 个捕获组（0 组无处取值，多组取哪个有歧义）
+//  2. 请求文本中出现的每个 {{var}} 必须已声明（含"零声明但写了 {{var}}"的旧模板误用：
+//     不检查会被静默当字面量发出，违反绝不静默原则）
+//  3. 声明未被任何规则引用 → 报错（笔误）
+//  4. 依赖不得成环（A 引 B 的变量、B 又引 A 的变量）
+//
+// 无 extract 声明且无 {{var}} 引用的 spec（全部旧模板）直接通过，零影响。
+func validateExtracts(spec *model.Spec) error {
+	declaredBy := map[string]string{} // 变量名 → 声明它的 rule
+	for name, rule := range spec.Rules {
+		for varName, pattern := range rule.Extract {
+			re, err := regexp.Compile(pattern)
+			if err != nil {
+				return fmt.Errorf("rule %s 变量 %s 的正则无法编译: %w（RE2 语法）", name, varName, err)
+			}
+			if n := re.NumSubexp(); n != 1 {
+				return fmt.Errorf("rule %s 变量 %s 的正则须恰好 1 个捕获组，当前 %d 个", name, varName, n)
+			}
+			if _, dup := declaredBy[varName]; dup {
+				return fmt.Errorf("变量 %s 在多个 rule 中重复声明", varName)
+			}
+			declaredBy[varName] = name
+		}
+	}
+
+	// 先扫全部请求文本：{{var}} 引用必须全部已声明，且至少一处真实引用
+	refs := map[string][]string{} // 规则 → 引用的变量
+	anyRef := false
+	for name := range spec.Rules {
+		for _, text := range requestTexts(spec, name) {
+			for _, m := range VarRefRe.FindAllStringSubmatch(text, -1) {
+				owner, ok := declaredBy[m[1]]
+				if !ok {
+					return fmt.Errorf("rule %s 引用了未声明的变量 {{%s}}（先在某个规则里 extract 声明它）", name, m[1])
+				}
+				if owner == name {
+					return fmt.Errorf("rule %s 引用了自己声明的变量 {{%s}}（此时值尚不存在，须由其他规则引用）", name, m[1])
+				}
+				refs[name] = append(refs[name], m[1])
+				anyRef = true
+			}
+		}
+	}
+	if len(declaredBy) == 0 && !anyRef {
+		return nil // 旧模板：无声明也无引用，全部跳过
+	}
+	if len(declaredBy) > 0 && !anyRef {
+		return fmt.Errorf("声明了 extract 变量但没有任何规则引用它们（删除 extract 或补上 {{变量名}} 引用）")
+	}
+
+	// 依赖环检测：规则级依赖 = 我引用了它声明的变量；DFS 三色标记
+	deps := map[string]map[string]bool{}
+	for name, vs := range refs {
+		m := map[string]bool{}
+		for _, v := range vs {
+			m[declaredBy[v]] = true
+		}
+		deps[name] = m
+	}
+	const (
+		white = 0
+		gray  = 1
+		black = 2
+	)
+	color := map[string]int{}
+	var visit func(n string, path []string) error
+	visit = func(n string, path []string) error {
+		color[n] = gray
+		for d := range deps[n] {
+			switch color[d] {
+			case gray:
+				return fmt.Errorf("规则依赖成环: %s → %s", strings.Join(append(path, d), " → "), d)
+			case white:
+				if err := visit(d, append(path, d)); err != nil {
+					return err
+				}
+			}
+		}
+		color[n] = black
+		return nil
+	}
+	for name := range deps {
+		if color[name] == white {
+			if err := visit(name, []string{name}); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func validateStructure(spec *model.Spec) error {

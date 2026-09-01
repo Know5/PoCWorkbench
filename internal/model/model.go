@@ -104,6 +104,10 @@ type Spec struct {
 type Rule struct {
 	Request    Request `yaml:"request" json:"request"`
 	Expression string  `yaml:"expression" json:"expression"`
+	// Extract 变量提取（v1.2 串联验证）：变量名 → 含恰好 1 个捕获组的正则，
+	// 作用面为本规则响应 body（http）/ raw（tcp）。提取值经 {{变量名}} 供后续规则引用。
+	// 旧模板无此字段：omitempty 保证 schema 兼容，引擎按无变量处理，行为不变。
+	Extract map[string]string `yaml:"extract,omitempty" json:"extract,omitempty"`
 }
 
 type Request struct {
