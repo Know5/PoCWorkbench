@@ -33,31 +33,162 @@ var CategorySet = map[string]bool{
 // ---- 表达式函数注册表（引擎与校验共用）----
 
 // FuncNames 是 response 对象上可用的方法名（xray 风格），用于方法调用改写。
+// contains / matches 无对应注册函数——它们是 expr-lang 保留运算符，
+// 经 operatorFuncAlias 改写到 bcontains / bmatches。改写表与本清单必须同步维护。
 var FuncNames = []string{
 	"bcontains", "bmatches", "contains", "matches",
 	"startswith", "endswith", "bstartswith", "bendswith",
 	"tolower", "toupper",
 }
 
-// methodCallRe 匹配 `response.xxx.fn(` 形式，改写为 `fn(response.xxx, `。
-// 括号天然平衡：只把接收者挪进参数列表第一位。
+// methodCallRe 匹配 `response.xxx.fn(` 与 `response.headers['k'].fn(` 形式，
+// 改写为 `fn(response.xxx, `。括号天然平衡：只把接收者挪进参数列表第一位。
+// 接收者允许下标段（header 匹配的唯一实用形态），否则该形态走不到改写、
+// 会以「编译通过但运行期 invalid operation」的方式炸在用户脸上。
 var methodCallRe = func() *regexp.Regexp {
 	names := strings.Join(FuncNames, "|")
-	return regexp.MustCompile(`\b(response(?:\.[A-Za-z_][A-Za-z0-9_]*)+)\.(` + names + `)\(`)
+	receiver := `response(?:\.[A-Za-z_][A-Za-z0-9_]*|\[[^\[\]]*\])+`
+	return regexp.MustCompile(`\b(` + receiver + `)\.(` + names + `)\(`)
 }()
 
+// operatorFuncAlias 把与 expr-lang 保留中缀运算符同名的函数映射到等价的字节实现。
+// contains / matches 在 expr-lang 里是运算符，出现在调用位置一律解析失败
+// （`unexpected token Operator`），因此不能注册也不能改写成同名函数调用。
+// b* 实现经 toBytes 归一化入参，对字符串操作数语义等价。
+var operatorFuncAlias = map[string]string{
+	"contains": "bcontains",
+	"matches":  "bmatches",
+}
+
 // TransformExpression 将 xray 风格表达式改写为 expr-lang 可编译源码：
-// 方法调用 response.x.fn(a) → fn(response.x, a)。
+// 方法调用 response.x.fn(a) → fn(response.x, a)；与运算符同名的 fn 走别名表。
+// 改写只作用于字符串字面量之外的片段，避免把 needle 内容里的 `.contains(` 改坏。
 // 注：expr-lang 原生支持 b'...' 字节字面量（lexer unescapeBytes，原始字节语义），
 // 不得改写为 '...'——那会把 \xff 当 Unicode 码点 UTF-8 编码成两个字节，静默污染 needle。
 func TransformExpression(e string) string {
-	return methodCallRe.ReplaceAllString(e, `$2($1, `)
+	spans := literalSpans(e)
+	matches := methodCallRe.FindAllStringSubmatchIndex(e, -1)
+	if len(matches) == 0 {
+		return e
+	}
+	var out strings.Builder
+	last := 0
+	for _, m := range matches {
+		// 起点落在字面量内说明这是 needle 的内容（如 b'...contains('），不是代码
+		if insideAny(spans, m[0]) {
+			continue
+		}
+		recv := e[m[2]:m[3]]
+		fn := e[m[4]:m[5]]
+		if alias, ok := operatorFuncAlias[fn]; ok {
+			fn = alias
+		}
+		out.WriteString(e[last:m[0]])
+		out.WriteString(fn + "(" + recv + ", ")
+		last = m[1]
+	}
+	out.WriteString(e[last:])
+	return out.String()
+}
+
+type span struct{ lo, hi int }
+
+func insideAny(spans []span, pos int) bool {
+	for _, s := range spans {
+		if pos > s.lo && pos < s.hi {
+			return true
+		}
+	}
+	return false
+}
+
+// literalSpans 标出 '...' / "..." 字面量的字节区间（含反斜杠转义）。
+// 用于判定「某个匹配是否位于字面量内部」——下标键 ['k'] 本身也是字面量，
+// 因此不能按字面量切段后再匹配，只能按匹配起点是否落在区间内来筛。
+func literalSpans(s string) []span {
+	var out []span
+	for i := 0; i < len(s); {
+		c := s[i]
+		if c != '\'' && c != '"' {
+			i++
+			continue
+		}
+		j := i + 1
+		for j < len(s) {
+			if s[j] == '\\' {
+				j += 2
+				continue
+			}
+			if s[j] == c {
+				j++
+				break
+			}
+			j++
+		}
+		if j > len(s) {
+			j = len(s)
+		}
+		out = append(out, span{i, j - 1})
+		i = j
+	}
+	return out
 }
 
 // CompileResponseExpr 编译作用于 response 对象的 rule 表达式。
+// 除语法/类型外还静态校验字面量正则：运行期 reMatch 对编译失败的模式返回 error，
+// 但那要等到实测才暴露；写错一个字符的正则应当在保存时就被挡下。
 func CompileResponseExpr(raw string) (*vm.Program, error) {
 	src := TransformExpression(raw)
-	return expr.Compile(src, exprfn.Options()...)
+	p, err := expr.Compile(src, exprfn.Options()...)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkLiteralRegexps(src); err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+// regexFuncArity 需要校验正则字面量的函数 → 模式所在参数位。
+var regexFuncArity = map[string]int{"bmatches": 1, "matches": 1}
+
+// checkLiteralRegexps 遍历 AST，编译所有以字面量形式传入 bmatches/matches 的模式。
+// 非字面量（拼接/变量）无从静态判断，跳过。
+func checkLiteralRegexps(src string) error {
+	tree, err := parser.Parse(src)
+	if err != nil {
+		return nil // 语法错误已由 expr.Compile 报出，此处不重复
+	}
+	v := &regexLiteralChecker{}
+	ast.Walk(&tree.Node, v)
+	return v.err
+}
+
+type regexLiteralChecker struct{ err error }
+
+func (c *regexLiteralChecker) Visit(n *ast.Node) {
+	if c.err != nil {
+		return
+	}
+	call, ok := (*n).(*ast.CallNode)
+	if !ok {
+		return
+	}
+	id, ok := call.Callee.(*ast.IdentifierNode)
+	if !ok {
+		return
+	}
+	pos, ok := regexFuncArity[id.Value]
+	if !ok || len(call.Arguments) <= pos {
+		return
+	}
+	lit, ok := call.Arguments[pos].(*ast.StringNode)
+	if !ok {
+		return
+	}
+	if _, err := regexp.Compile(lit.Value); err != nil {
+		c.err = fmt.Errorf("正则 %q 无法编译: %w（RE2 语法；运行期无法匹配任何内容）", lit.Value, err)
+	}
 }
 
 // CheckRuleExpr 单条规则表达式的即时编译校验（前端逐字段反馈用）。

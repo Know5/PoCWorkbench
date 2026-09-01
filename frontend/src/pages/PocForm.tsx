@@ -574,6 +574,8 @@ function ExprInput({ value, onChange, validate, placeholder }: {
   );
 }
 
+// 这些示例逐条受后端测试约束（internal/pwf: TestUICheatsheetExamplesCompile），
+// 改动后须同步该测试的清单，避免再次出现「一键插入的示例自己编译不过」。
 const HTTP_EXAMPLES = [
   "response.status == 200",
   "response.status == 200 && response.body.bcontains(b'root:')",
@@ -611,8 +613,10 @@ function Cheatsheet() {
       ))}
       <div className="col-span-2 mt-2 border-t pt-2 text-[11px] leading-relaxed text-[var(--txt-faint)]" style={{ borderColor: "var(--line)" }}>
         可用字段：<code className="font-mono-data">response.status / headers / body / content_type / raw / elapsed_ms</code>
-        　函数：<code className="font-mono-data">bcontains(b'..') · bmatches('re') · contains · matches · startswith · endswith · tolower</code>
-        　正则为 RE2 语法。elapsed_ms 为该规则请求的网络耗时（毫秒），时间盲注用它做阈值判断。
+        　函数：<code className="font-mono-data">bcontains(b'..') · bmatches('re') · contains · matches · startswith · endswith · bstartswith · bendswith · tolower · toupper</code>
+        　正则为 RE2 语法，反斜杠需双写：<code className="font-mono-data">bmatches('nginx/1\\.\\d+')</code>。
+        　响应头匹配写作 <code className="font-mono-data">response.headers['server']</code>（键名小写）。
+        　elapsed_ms 为该规则请求的网络耗时（毫秒），时间盲注用它做阈值判断。
       </div>
     </div>
   );

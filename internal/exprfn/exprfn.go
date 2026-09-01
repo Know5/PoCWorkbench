@@ -25,13 +25,7 @@ func Options() []expr.Option {
 			return strings.Contains(string(normalizeBytes(a)), string(normalizeBytes(b))), nil
 		}),
 		expr.Function("bmatches", func(p ...any) (any, error) {
-			return reMatch(normalizeBytes(toBytes(p[0])), toStr(p[1])), nil
-		}),
-		expr.Function("contains", func(p ...any) (any, error) {
-			return strings.Contains(toStr(p[0]), toStr(p[1])), nil
-		}),
-		expr.Function("matches", func(p ...any) (any, error) {
-			return reMatch([]byte(toStr(p[0])), toStr(p[1])), nil
+			return reMatch(normalizeBytes(toBytes(p[0])), toStr(p[1]))
 		}),
 		expr.Function("bstartswith", func(p ...any) (any, error) {
 			return strings.HasPrefix(string(normalizeBytes(toBytes(p[0]))), toStr(p[1])), nil
@@ -92,10 +86,13 @@ func toStr(v any) string {
 	}
 }
 
-func reMatch(b []byte, pattern string) bool {
+// reMatch 编译并匹配。编译失败必须报错而非返回 false：
+// 静默 false 会让写错的正则表现为「永远未命中」，实测结果看不出任何异常。
+// pwf.CompileResponseExpr 已在保存期静态拦截字面量正则，这里兜住非字面量路径。
+func reMatch(b []byte, pattern string) (bool, error) {
 	r, err := regexp.Compile(pattern)
 	if err != nil {
-		return false
+		return false, fmt.Errorf("正则 %q 无法编译: %w", pattern, err)
 	}
-	return r.Match(b)
+	return r.Match(b), nil
 }
