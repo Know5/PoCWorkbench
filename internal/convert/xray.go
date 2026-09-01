@@ -143,9 +143,14 @@ func XrayToDraft(xrayYAML string) (*model.Draft, error) {
 		}
 		rule := model.Rule{}
 		if req, ok := rmap["request"].(map[string]any); ok {
-			rule.Request.Method = strings.ToUpper(orDefault(str(req["method"]), "GET"))
+			// method 只对 http 有意义；tcp 下补 GET 只是在产物里留噪声
+			if transport == "http" {
+				rule.Request.Method = strings.ToUpper(orDefault(str(req["method"]), "GET"))
+			} else {
+				rule.Request.Method = strings.ToUpper(str(req["method"]))
+			}
 			rule.Request.Path = str(req["path"])
-			rule.Request.Body = str(req["body"])
+			rule.Request.Body = rawStr(req["body"]) // 载荷：空白是协议字节，不可裁剪
 			if hs, ok := req["headers"].(map[string]any); ok {
 				hh := map[string]string{}
 				for k, v := range hs {
@@ -156,7 +161,8 @@ func XrayToDraft(xrayYAML string) (*model.Draft, error) {
 			if inputs, ok := req["inputs"].([]any); ok {
 				for _, iv := range inputs {
 					if im, ok := iv.(map[string]any); ok {
-						rule.Request.Inputs = append(rule.Request.Inputs, model.TCPInput{Data: str(im["data"])})
+						// 同上：`"@RSYNCD: 31.0\n\n"` 末尾换行是握手的一部分
+						rule.Request.Inputs = append(rule.Request.Inputs, model.TCPInput{Data: rawStr(im["data"])})
 					}
 				}
 			}
@@ -194,9 +200,19 @@ func XrayToDraft(xrayYAML string) (*model.Draft, error) {
 	return draft, nil
 }
 
+// str 取字符串并裁剪首尾空白——仅适用于元数据类字段（name/id/vendor/表达式等）。
+// 载荷类字段一律用 rawStr：那里的空白是协议字节。
 func str(v any) string {
 	s, _ := v.(string)
 	return strings.TrimSpace(s)
+}
+
+// rawStr 原样取字符串，不裁剪。
+// TCP inputs 的 data 与 HTTP body 属于协议载荷：`"@RSYNCD: 31.0\n\n"` 末尾的换行
+// 是 rsync 握手的一部分，被裁掉后对端不回话，转换出来的 PoC 静默打不响。
+func rawStr(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func intOf(v any) int {

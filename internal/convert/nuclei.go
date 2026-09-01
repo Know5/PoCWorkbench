@@ -152,11 +152,13 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 
 	// ---- 协议块 → 规则 ----
 	spec := model.Spec{Rules: map[string]model.Rule{}}
-	var order []string          // 规则名顺序（map 无序，最终表达式拼接必须稳定）
-	matchersCond := ""          // 首个显式 matchers-condition 生效
+	var order []string // 规则名顺序（map 无序，最终表达式拼接必须稳定）
 	hostHeaderDropped := false
 
-	addRule := func(rule model.Rule, expr, cond, label string) {
+	// addRule 登记一条规则。matchers-condition 只在 buildMatcherExpr 内部生效
+	// （nuclei 语义：它合并单请求内的 matchers），绝不外溢到规则间的总表达式——
+	// 一个 http 块里的多个 path/raw 是彼此独立的请求，nuclei 判定为任一命中即命中。
+	addRule := func(rule model.Rule, expr, label string) {
 		expr = strings.TrimSpace(expr)
 		if expr == "" {
 			draft.Warnings = append(draft.Warnings, fmt.Sprintf("%s 无可用 matcher 组合，该请求未纳入", label))
@@ -166,16 +168,6 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 		rule.Expression = expr
 		spec.Rules[rname] = rule
 		order = append(order, rname)
-		if cond == "" {
-			return
-		}
-		c := normalizeCond(cond)
-		if matchersCond == "" {
-			matchersCond = c
-		} else if matchersCond != c {
-			draft.Warnings = append(draft.Warnings,
-				fmt.Sprintf("%s 的 matchers-condition(%s) 与先前(%s)不一致，按 %s 合并", label, c, matchersCond, matchersCond))
-		}
 	}
 
 	convertReqMatchers := func(reqMap map[string]any, subject, label string) (string, error) {
@@ -197,7 +189,6 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			continue
 		}
 		label := fmt.Sprintf("http[%d]", i)
-		mc := strings.ToLower(str(reqMap["matchers-condition"]))
 
 		raws, _ := reqMap["raw"].([]any)
 		for j, rv := range raws {
@@ -221,7 +212,7 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			}
 			addRule(model.Rule{
 				Request: model.Request{Method: method, Path: ensureAbsPath(path), Headers: headers, Body: body},
-			}, expr, mc, sub)
+			}, expr, sub)
 		}
 
 		paths, _ := reqMap["path"].([]any)
@@ -243,7 +234,7 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			}
 			addRule(model.Rule{
 				Request: model.Request{Method: method, Path: ensureAbsPath(p), Headers: hs, Body: body},
-			}, expr, mc, sub)
+			}, expr, sub)
 		}
 	}
 
@@ -278,7 +269,7 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			if err != nil {
 				return nil, err
 			}
-			addRule(rule, expr, strings.ToLower(str(reqMap["matchers-condition"])), label)
+			addRule(rule, expr, label)
 		}
 	}
 	if len(tcpList)+len(netList) > 0 {
@@ -317,18 +308,16 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 	if len(order) == 1 {
 		spec.Expression = order[0] + "()"
 	} else {
-		op := "||"
-		if normalizeCond(orDefault(matchersCond, "or")) == "and" {
-			op = "&&"
-		}
+		// 多请求恒以 || 合并：nuclei 对同块内多个 path/raw 逐个独立发起，
+		// 任一请求命中即报告命中。此前误用请求内的 matchers-condition 拼接规则间关系，
+		// and 模板会退化成「所有路径都必须命中」，实际是漏报。
 		var calls []string
 		for _, n := range order {
 			calls = append(calls, n+"()")
 		}
-		spec.Expression = strings.Join(calls, " "+op+" ")
-		if len(order) > 2 {
-			draft.Warnings = append(draft.Warnings, fmt.Sprintf("多请求模板按 %s 条件合并为总表达式", strings.ToUpper(orDefault(matchersCond, "or"))))
-		}
+		spec.Expression = strings.Join(calls, " || ")
+		draft.Warnings = append(draft.Warnings,
+			fmt.Sprintf("模板含 %d 个独立请求，总表达式按「任一命中即命中」（||）合并；若原模板依赖请求间的串联/状态传递，需人工改写", len(order)))
 	}
 
 	specBytes, err := yaml.Marshal(&spec)
@@ -363,10 +352,11 @@ func buildMatcherExpr(reqMap map[string]any, subject string) (expr string, notes
 			return "", notes, fmt.Errorf("matcher[%d] 结构异常", mi)
 		}
 		g, note := matcherGroup(mmap, subject)
+		// note 与 g 独立：跳过时说明原因，降级时（part=response/all）g 仍可用但同样要提示
+		if note != "" {
+			notes = append(notes, fmt.Sprintf("matcher[%d](%s): %s", mi, str(mmap["type"]), note))
+		}
 		if g == "" {
-			if note != "" {
-				notes = append(notes, fmt.Sprintf("matcher[%d](%s): %s", mi, str(mmap["type"]), note))
-			}
 			continue
 		}
 		groups = append(groups, g)
@@ -374,20 +364,51 @@ func buildMatcherExpr(reqMap map[string]any, subject string) (expr string, notes
 	if len(groups) == 0 {
 		return "", notes, fmt.Errorf("全部 matchers 均无法转换为表达式，需人工改写")
 	}
-	out := groups[0]
-	if len(groups) > 1 {
-		out = strings.Join(groups, " "+op+" ")
-	}
-	return out, notes, nil
+	// 各组已在 matcherGroup 内做括号保护，可直接拼接：
+	// 此前裸拼导致 `a || b && c` 按 `a || (b && c)` 求值（&& 优先级高于 ||），
+	// matchers-condition: and 配多值 status 时只要状态码命中就假命中。
+	return strings.Join(groups, " "+op+" "), notes, nil
 }
 
 // matcherGroup 返回单个 matcher 的子表达式；空串 + note 表示安全跳过并说明原因。
+// 返回值对 && / || 而言是原子的（复合表达式已加括号，negative 已取反），
+// 调用方可直接用运算符拼接而不必关心优先级。
 func matcherGroup(m map[string]any, subject string) (expr, note string) {
+	expr, note = matcherGroupCore(m, subject)
+	if expr == "" {
+		return "", note
+	}
+	// negative 必须整体取反并括号化：! 优先级高于 ==，`!response.status == 200` 会错解
+	if isTruthy(m["negative"]) {
+		return "!(" + expr + ")", note
+	}
+	return parenIfCompound(expr), note
+}
+
+// parenIfCompound 对含 &&/|| 的表达式加括号，使其可安全参与外层拼接。
+func parenIfCompound(s string) string {
+	if strings.Contains(s, " || ") || strings.Contains(s, " && ") {
+		return "(" + s + ")"
+	}
+	return s
+}
+
+// httpWideParts nuclei 中含「响应头 + 状态行」的匹配面。
+// PWF 的 http 只暴露 response.body，映射过去会丢掉头部内容 → 可能漏匹配。
+// 注：tcp 场景 response.raw 本就是全量字节流，这些 part 名不构成降级。
+var httpWideParts = map[string]bool{"response": true, "all": true, "raw": true}
+
+func matcherGroupCore(m map[string]any, subject string) (expr, note string) {
 	mtype := strings.ToLower(str(m["type"]))
 	part := strings.ToLower(str(m["part"]))
 	target := subject
-	if part == "header" || part == "all" || part == "interactsh_protocol" {
+	// header 单独匹配响应头：PWF 无该匹配面，映射到 body 必然错，只能跳过
+	if part == "header" || strings.HasPrefix(part, "interactsh") {
 		return "", fmt.Sprintf("part=%q 无法映射到 PWF 的匹配面，已跳过", part)
+	}
+	// 宽匹配面降级为仅匹配响应体：可能漏掉响应头里的证据，必须明示而非静默
+	if subject == "body" && httpWideParts[part] {
+		note = fmt.Sprintf("part=%q 已降级为仅匹配响应体（PWF 的 http 无「响应头+体」合一匹配面），若原意在响应头请人工改写", part)
 	}
 
 	scalarOf := func(v any) string {
@@ -443,7 +464,8 @@ func matcherGroup(m map[string]any, subject string) (expr, note string) {
 		if len(terms) == 0 {
 			return "", "status 列表为空"
 		}
-		return strings.Join(terms, " || "), ""
+		// 各分支一律回传既有 note（part 降级提示在此之前已写入），不得用 "" 覆盖
+		return strings.Join(terms, " || "), note
 
 	case "word":
 		words := itemsOf("words")
@@ -454,7 +476,7 @@ func matcherGroup(m map[string]any, subject string) (expr, note string) {
 		for _, w := range words {
 			terms = append(terms, wordTerm(subj, w, ci))
 		}
-		return strings.Join(terms, " "+innerOp+" "), ""
+		return strings.Join(terms, " "+innerOp+" "), note
 
 	case "regex":
 		pats := itemsOf("regex")
@@ -467,9 +489,13 @@ func matcherGroup(m map[string]any, subject string) (expr, note string) {
 			if ci {
 				flags = "(?i)"
 			}
-			terms = append(terms, fmt.Sprintf("%s.bmatches('%s')", subj, exprEscape(flags+p)))
+			pat := flags + p
+			if _, rerr := regexp.Compile(pat); rerr != nil {
+				return "", fmt.Sprintf("正则 %q 无法编译（%v），已跳过——留着会在运行期静默不命中", p, rerr)
+			}
+			terms = append(terms, fmt.Sprintf("%s.bmatches('%s')", subj, exprEscape(pat)))
 		}
-		return strings.Join(terms, " "+innerOp+" "), ""
+		return strings.Join(terms, " "+innerOp+" "), note
 
 	case "binary":
 		bins := itemsOf("binary")
@@ -484,7 +510,7 @@ func matcherGroup(m map[string]any, subject string) (expr, note string) {
 			}
 			terms = append(terms, fmt.Sprintf("%s.bcontains(b'%s')", subj, bytesLiteral(string(hexBytes))))
 		}
-		return strings.Join(terms, " "+innerOp+" "), ""
+		return strings.Join(terms, " "+innerOp+" "), note
 
 	default:
 		return "", "类型暂不支持自动转换，请改写为等价 word/status/regex/binary 组合后重新粘贴"
@@ -656,9 +682,13 @@ func stripPathVars(p string, draft *model.Draft) string {
 	return strings.TrimSpace(p)
 }
 
+// ensureAbsPath 归一化为以 / 开头的路径。
+// 空串（裸 {{BaseURL}} 剥离后的常见形态）必须补成 "/"：
+// PWF 要求 http 规则 path 非空，此前返回空串会让转换成功的草稿在保存时被
+// 三关校验挡下并报「缺少 path」，用户无从判断问题出在哪。
 func ensureAbsPath(p string) string {
 	if p == "" {
-		return ""
+		return "/"
 	}
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p

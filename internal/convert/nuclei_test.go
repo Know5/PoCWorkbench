@@ -123,7 +123,9 @@ func TestNucleiSampleRawAndMatchers(t *testing.T) {
 	}
 }
 
-func nucleiSampleID() string { return "dahuaDSS-attachment_downloadAtt_action-File-reading-XVE-2024-34436" }
+func nucleiSampleID() string {
+	return "dahuaDSS-attachment_downloadAtt_action-File-reading-XVE-2024-34436"
+}
 
 // path 型请求：{{BaseURL}} 剥离、多 matcher 默认 or 合并。
 func TestNucleiPathBaseURLDefaultOr(t *testing.T) {
@@ -303,7 +305,10 @@ tcp:
 	}
 }
 
-// 多请求：path 数组多个条目生成多条规则并按 matchers-condition 合并总表达式。
+// 多请求：path 数组多个条目生成多条独立规则，总表达式恒以 || 合并。
+// matchers-condition 是「单请求内 matchers 的合并方式」，不描述请求之间的关系——
+// nuclei 对同块内多个 path 逐个独立发起，任一命中即报告命中。
+// 详见 nuclei_semantics_test.go: TestNucleiMultiPathJoinsWithOr。
 func TestNucleiMultiRuleChain(t *testing.T) {
 	src := `id: t7
 info:
@@ -321,17 +326,20 @@ http:
 	d := mustNuclei(t, src)
 	var spec model.Spec
 	_ = yaml.Unmarshal([]byte(d.SpecYAML), &spec)
-	if len(spec.Rules) != 2 || spec.Expression != "r0() && r1()" {
-		t.Fatalf("两条路径应合并 r0() && r1(): rules=%d expr=%s", len(spec.Rules), spec.Expression)
+	if len(spec.Rules) != 2 || spec.Expression != "r0() || r1()" {
+		t.Fatalf("两条路径应合并 r0() || r1(): rules=%d expr=%s", len(spec.Rules), spec.Expression)
+	}
+	if !strings.Contains(strings.Join(d.Warnings, "\n"), "任一命中即命中") {
+		t.Errorf("多请求合并方式应有明示警告: %v", d.Warnings)
 	}
 }
 
 func TestDetectFormatMatrix(t *testing.T) {
 	cases := map[string]string{
-		nucleiSample: FormatNuclei,
-		"id: x\ninfo:\n  name: only meta":                          FormatNuclei,
+		nucleiSample:                      FormatNuclei,
+		"id: x\ninfo:\n  name: only meta": FormatNuclei,
 		"name: y\ntransport: http\nrules:\n  r0:\n    request: {}\nexpression: r0()": FormatXray,
-		"id: z\nrandom_key: 1":                     FormatUnknown,
+		"id: z\nrandom_key: 1": FormatUnknown,
 	}
 	for src, want := range cases {
 		if got := DetectFormat(src); got != want {
