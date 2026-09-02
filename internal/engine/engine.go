@@ -17,6 +17,8 @@ import (
 	"net/http"
 	"net/http/httptrace"
 	"net/url"
+	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -155,6 +157,21 @@ type ruleState struct {
 	done  bool
 	value bool
 	err   error
+	// vars 本规则 extract 的提取结果（变量名 → 值）；串联规则引用前置规则的变量。
+	vars map[string]string
+}
+
+// runVars 把一次运行中所有规则的已提取变量汇总为引擎内部的名字集合。
+func runVars(states map[string]*ruleState) map[string]string {
+	out := map[string]string{}
+	for _, st := range states {
+		for k, v := range st.vars {
+			if _, dup := out[k]; !dup { // pwf 已保证变量名不重复声明
+				out[k] = v
+			}
+		}
+	}
+	return out
 }
 
 // Run 执行（无日志回调）。
@@ -191,21 +208,67 @@ func (e *Engine) RunSink(ctx context.Context, spec *model.Spec, target, proxy st
 
 	states := map[string]*ruleState{}
 	var mu sync.Mutex
-	evalRule := func(name string) (bool, error) {
+
+	// ruleDeps: 规则 → 它引用了谁的变量（保存期已校验无环，运行期直接递归）
+	// ruleRefVars: 规则 → 它引用的已声明变量名（执行前逐一检查就绪；
+	//   未声明的 {{...}} 不在此列——旧模板的字面量直发行为保持不变）
+	ruleDeps := map[string][]string{}
+	ruleRefVars := map[string][]string{}
+	declaredOwner := map[string]string{}
+	for name, rule := range spec.Rules {
+		for v := range rule.Extract {
+			declaredOwner[v] = name
+		}
+	}
+	for name := range spec.Rules {
+		refSet, depSet := map[string]bool{}, map[string]bool{}
+		for _, text := range pwf.RequestTexts(spec, name) {
+			for _, m := range pwf.VarRefRe.FindAllStringSubmatch(text, -1) {
+				if owner := declaredOwner[m[1]]; owner != "" && owner != name {
+					refSet[m[1]] = true
+					depSet[owner] = true
+				}
+			}
+		}
+		for v := range refSet {
+			ruleRefVars[name] = append(ruleRefVars[name], v)
+		}
+		sort.Strings(ruleRefVars[name])
+		for d := range depSet {
+			ruleDeps[name] = append(ruleDeps[name], d)
+		}
+	}
+
+	// evalRule 惰性求值一条规则；串联规则先递归跑完依赖（依赖提取失败则本规则
+	// 不发请求直接 error——继续发会制造误导目标日志的畸形请求）。
+	var evalRule func(name string) (bool, error)
+	evalRule = func(name string) (bool, error) {
 		mu.Lock()
 		st, ok := states[name]
 		if !ok {
 			st = &ruleState{}
 			states[name] = st
 			mu.Unlock()
+			// 依赖先行：提取不到原料的下游规则没有执行的资格
+			for _, dep := range ruleDeps[name] {
+				if _, derr := evalRule(dep); derr != nil {
+					mu.Lock()
+					st.done = true
+					st.err = fmt.Errorf("依赖规则 %s 失败: %w", dep, derr)
+					mu.Unlock()
+					return false, st.err
+				}
+			}
 			rule := spec.Rules[name]
-			val, rlog, rerr := e.execRule(runCtx, spec.Transport, name, rule, target, proxy, started)
+			vars := runVars(states) // 依赖链上全部已提取变量
+			val, rlog, rerr := e.execRule(runCtx, spec.Transport, name, rule, target, proxy, started, vars, ruleRefVars[name])
 			// 逐规则日志同样要过 sink：此前只写 logBuf，前端日志面板在整轮运行期间
 			// 一片空白，结束时才蹦出一行 [final]，长跑（默认硬超时 60s）看不到任何进展
 			emitLines(rlog, sink)
 			logBuf.WriteString(rlog)
 			mu.Lock()
 			st.done = true
+			st.vars = ruleVars(rule, vars) // 本规则自己的提取结果（execRule 已写入 vars 副本）
 			if rerr != nil {
 				st.err = rerr
 			} else {
@@ -295,14 +358,118 @@ func ValidateTarget(transport, target string) error {
 	return nil
 }
 
-func (e *Engine) execRule(ctx context.Context, transport, name string, rule model.Rule, target, proxy string, started time.Time) (bool, string, error) {
+// ruleVars 取本规则声明的变量在已求值集合中的值（依赖链产出），
+// 作为该规则执行后的对外可见贡献。
+func ruleVars(rule model.Rule, available map[string]string) map[string]string {
+	if len(rule.Extract) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(rule.Extract))
+	for v := range rule.Extract {
+		if val, ok := available[v]; ok {
+			out[v] = val
+		}
+	}
+	return out
+}
+
+// substitutedRequest 构建 rule 的实际请求：引用了 {{var}} 的字段做替换。
+// 无引用（全部旧模板）原样返回——零替换、零分配，行为与历史版本逐字节一致。
+func substitutedRequest(req model.Request, vars map[string]string) model.Request {
+	if len(vars) == 0 {
+		return req
+	}
+	sub := func(s string) string {
+		if !strings.Contains(s, "{{") {
+			return s
+		}
+		return pwf.VarRefRe.ReplaceAllStringFunc(s, func(m string) string {
+			name := strings.TrimSpace(m[2 : len(m)-2])
+			if v, ok := vars[name]; ok {
+				return v
+			}
+			return m // 未声明的 {{..}}：保存期已拒绝该形态，这里不可能到达
+		})
+	}
+	req.Path = sub(req.Path)
+	req.Body = sub(req.Body)
+	req.Method = sub(req.Method)
+	if len(req.Headers) > 0 {
+		hs := make(map[string]string, len(req.Headers))
+		for k, v := range req.Headers {
+			hs[k] = sub(v)
+		}
+		req.Headers = hs
+	}
+	if len(req.Inputs) > 0 {
+		ins := make([]model.TCPInput, len(req.Inputs))
+		for i, in := range req.Inputs {
+			ins[i] = model.TCPInput{Data: sub(in.Data)}
+		}
+		req.Inputs = ins
+	}
+	return req
+}
+
+// extractVars 在响应上执行规则的 extract 声明。
+// 任一变量提取不到即报错：串联链上缺失原料还继续，只会发出误导性请求。
+func extractVars(rule model.Rule, resp *Response) (map[string]string, error) {
+	if len(rule.Extract) == 0 {
+		return nil, nil
+	}
+	source := resp.Body
+	if len(source) == 0 && len(resp.Raw) > 0 {
+		source = resp.Raw // tcp 场景作用面为 raw
+	}
+	out := make(map[string]string, len(rule.Extract))
+	for name, pattern := range rule.Extract {
+		re, err := regexp.Compile(pattern) // 保存期已校验可编译，防御性兜底
+		if err != nil {
+			return nil, fmt.Errorf("变量 %s 正则无法编译: %w", name, err)
+		}
+		m := re.FindSubmatch(source)
+		if m == nil {
+			return nil, fmt.Errorf("变量 %s 提取失败（正则 %q 未命中响应）", name, pattern)
+		}
+		out[name] = string(m[1])
+	}
+	return out, nil
+}
+
+func (e *Engine) execRule(ctx context.Context, transport, name string, rule model.Rule, target, proxy string, started time.Time, upstreamVars map[string]string, refVars []string) (bool, string, error) {
+	// 已声明变量未就绪（其 owner 规则判 false 无产出）时跳过执行——把裸 {{var}}
+	// 字面量发给目标只会制造畸形请求。返回 false 而非 error：目标不具备漏洞的
+	// 前置条件，miss 才是诚实分类；&& 链上到不了这里（短路在前），
+	// 只有 || 链会在左侧为假后仍调用右侧规则，进入本门。
+	if len(refVars) > 0 {
+		var missing []string
+		for _, v := range refVars {
+			if _, ok := upstreamVars[v]; !ok {
+				missing = append(missing, v)
+			}
+		}
+		if len(missing) > 0 {
+			sort.Strings(missing)
+			return false, fmt.Sprintf("[%s] 变量 %s 未就绪，跳过执行\n", name, strings.Join(missing, ", ")), nil
+		}
+	}
+	req := substitutedRequest(rule.Request, upstreamVars)
+	var extraLog string
+	if len(upstreamVars) > 0 && pwf.HasVarRef(rule.Request) {
+		names := make([]string, 0, len(upstreamVars))
+		for k, v := range upstreamVars {
+			names = append(names, k+"="+head([]byte(v), 64))
+		}
+		sort.Strings(names)
+		extraLog = "    vars=" + strings.Join(names, ", ") + "\n"
+	}
 	var resp *Response
 	var err error
 	switch transport {
 	case "http":
-		resp, err = e.execHTTP(ctx, rule.Request, target, proxy)
+		resp, err = e.execHTTP(ctx, req, target, proxy)
 	default:
-		resp, err = e.execTCP(ctx, rule.Request, target, proxy)
+		resp, err = e.execTCP(ctx, req, target, proxy)
 	}
 	if err != nil {
 		return false, fmt.Sprintf("[%s] 执行失败: %v\n", name, err), err
@@ -319,9 +486,43 @@ func (e *Engine) execRule(ctx context.Context, transport, name string, rule mode
 		return false, "", fmt.Errorf("rule %s 求值失败: %w", name, verr)
 	}
 	val, _ := out.(bool)
-	logLine := fmt.Sprintf("[%s] %s => %v (%s)\n", name, describeRequest(transport, rule.Request, target), val, time.Since(started).Round(time.Millisecond))
+
+	logLine := fmt.Sprintf("[%s] %s => %v (%s)\n", name, describeRequest(transport, req, target), val, time.Since(started).Round(time.Millisecond))
 	logLine += describeResponse(transport, resp)
+	logLine += extraLog
+
+	// 提取在判定之后：规则判 false 意味着响应不合预期，此时报提取失败会掩盖
+	// 真正的 miss 语义（依赖链上该规则不产出变量，&& 短路自然传导为 miss）。
+	// 判 true 后提取不到才算 error——响应"看似正常"却缺原料，链必须中止。
+	vars := map[string]string{}
+	if val && len(rule.Extract) > 0 {
+		var xerr error
+		vars, xerr = extractVars(rule, resp)
+		if xerr != nil {
+			return false, logLine + fmt.Sprintf("[%s] %v\n", name, xerr), xerr
+		}
+		if len(vars) > 0 {
+			var parts []string
+			for _, kv := range sortedPairs(vars) {
+				parts = append(parts, kv[0]+"="+head([]byte(kv[1]), 64))
+			}
+			logLine += "    extract " + strings.Join(parts, ", ") + "\n"
+		}
+	}
+	// 提取结果写回 upstreamVars（调用方持有），供 runVars 汇总
+	for k, v := range vars {
+		upstreamVars[k] = v
+	}
 	return val, logLine, nil
+}
+
+func sortedPairs(m map[string]string) [][2]string {
+	out := make([][2]string, 0, len(m))
+	for k, v := range m {
+		out = append(out, [2]string{k, v})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i][0] < out[j][0] })
+	return out
 }
 
 func describeRequest(transport string, req model.Request, target string) string {

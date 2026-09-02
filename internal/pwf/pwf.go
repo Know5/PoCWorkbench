@@ -271,8 +271,27 @@ func ExtractFrom(text string, declared map[string]bool) []string {
 	return out
 }
 
-// requestTexts 规则请求中允许出现 {{var}} 的全部字段。
-func requestTexts(spec *model.Spec, name string) []string {
+// HasVarRef 请求的任一字段是否引用了 {{var}}（不含声明白名单——任何花括号形态都算）。
+// 引擎据此判断是否需要走替换路径。
+func HasVarRef(req model.Request) bool {
+	texts := []string{req.Path, req.Body, req.Method}
+	for _, v := range req.Headers {
+		texts = append(texts, v)
+	}
+	for _, in := range req.Inputs {
+		texts = append(texts, in.Data)
+	}
+	for _, t := range texts {
+		if VarRefRe.MatchString(t) {
+			return true
+		}
+	}
+	return false
+}
+
+// RequestTexts 规则请求中允许出现 {{var}} 的全部字段（method/path/headers 值/body/inputs）。
+// 保存期校验与引擎运行期共用同一清单，保证两端看到的引用面一致。
+func RequestTexts(spec *model.Spec, name string) []string {
 	r := spec.Rules[name]
 	texts := []string{r.Request.Path, r.Request.Body, r.Request.Method}
 	for _, v := range r.Request.Headers {
@@ -314,7 +333,7 @@ func validateExtracts(spec *model.Spec) error {
 	refs := map[string][]string{} // 规则 → 引用的变量
 	anyRef := false
 	for name := range spec.Rules {
-		for _, text := range requestTexts(spec, name) {
+		for _, text := range RequestTexts(spec, name) {
 			for _, m := range VarRefRe.FindAllStringSubmatch(text, -1) {
 				owner, ok := declaredBy[m[1]]
 				if !ok {
