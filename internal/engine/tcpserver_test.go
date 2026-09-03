@@ -131,8 +131,11 @@ func TestExecTCPHTTPProxyConnect(t *testing.T) {
 						break
 					}
 				}
-				c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
-				c.Write([]byte("@RSYNCD: OK\n"))
+			c.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n"))
+			// 200 与数据间留出间隔：真实代理总是分开推送（Linux 上连写可能同包到达，
+			// 引擎的"隧道建立前异常数据"防御是按响应头独立成包设计的）
+			time.Sleep(20 * time.Millisecond)
+			c.Write([]byte("@RSYNCD: OK\n"))
 				buf := make([]byte, 4096)
 				for {
 					if _, err := c.Read(buf); err != nil {
