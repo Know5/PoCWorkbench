@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 	"io"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -198,6 +199,124 @@ func (a *App) CreatePoc(d *model.Draft) (string, error) {
 		return "", fmt.Errorf("内容重复：相同 spec 已存在")
 	}
 	return uid, nil
+}
+
+// PickImportDir 弹出系统目录选择框；取消返回空串。
+func (a *App) PickImportDir() (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("应用尚未初始化完成")
+	}
+	return runtime.OpenDirectoryDialog(a.ctx, runtime.OpenDialogOptions{
+		Title: "选择模板目录（递归导入 .yaml/.yml）",
+	})
+}
+
+// BatchImportResults 批量导入结果：每文件一行，失败含原因。
+type BatchImportResults struct {
+	Created int                `json:"created"`
+	Skipped int                `json:"skipped"` // spec 重复（已有相同内容）
+	Failed  int                `json:"failed"`
+	Details []BatchImportEntry `json:"details"`
+}
+
+type BatchImportEntry struct {
+	File   string `json:"file"`             // 相对导入根的路径
+	Status string `json:"status"`           // created|skipped|failed
+	Reason string `json:"reason,omitempty"` // skipped/failed 的原因
+}
+
+// ImportTemplates 批量导入目录下的模板文件（.yaml/.yml，递归）。
+// 每文件独立处理：转换失败/校验失败/spec 重复只记录该文件，不中断整批。
+// 上限：单文件 256KB（与粘贴一致）、单批 2000 文件（防误选超大目录拖死 UI）。
+func (a *App) ImportTemplates(dir string) (*BatchImportResults, error) {
+	if err := a.requireStore(); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(dir) == "" {
+		return nil, fmt.Errorf("未选择目录")
+	}
+	info, err := os.Stat(dir)
+	if err != nil || !info.IsDir() {
+		return nil, fmt.Errorf("目录不可读: %s", dir)
+	}
+	var files []string
+	err = filepath.WalkDir(dir, func(path string, d fs.DirEntry, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(d.Name()))
+		if ext == ".yaml" || ext == ".yml" {
+			files = append(files, path)
+			if len(files) >= 2000 {
+				return fs.SkipAll
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("遍历目录失败: %w", err)
+	}
+	if len(files) == 0 {
+		return nil, fmt.Errorf("目录下没有 .yaml/.yml 模板文件")
+	}
+
+	res := &BatchImportResults{Details: []BatchImportEntry{}}
+	for _, f := range files {
+		rel, _ := filepath.Rel(dir, f)
+		entry := BatchImportEntry{File: filepath.ToSlash(rel)}
+		data, rerr := os.ReadFile(f)
+		switch {
+		case rerr != nil:
+			entry.Status, entry.Reason = "failed", "读取失败: "+rerr.Error()
+		case len(data) > 256<<10:
+			entry.Status, entry.Reason = "failed", "超过 256KB 上限"
+		default:
+			entry.Status, entry.Reason = a.importOne(string(data))
+		}
+		switch entry.Status {
+		case "created":
+			res.Created++
+		case "skipped":
+			res.Skipped++
+		default:
+			res.Failed++
+		}
+		res.Details = append(res.Details, entry)
+	}
+	return res, nil
+}
+
+// importOne 转换并入库单个模板；返回 (status, reason)。
+func (a *App) importOne(yamlText string) (string, string) {
+	var draft *model.Draft
+	switch convert.DetectFormat(yamlText) {
+	case convert.FormatXray:
+		d, err := convert.XrayToDraft(yamlText)
+		if err != nil {
+			return "failed", "Xray 转换失败: " + err.Error()
+		}
+		draft = d
+	case convert.FormatNuclei:
+		d, err := convert.NucleiToDraft(yamlText)
+		if err != nil {
+			return "failed", "Nuclei 转换失败: " + err.Error()
+		}
+		draft = d
+	default:
+		return "failed", "无法识别模板格式（支持 Xray 与 Nuclei）"
+	}
+	_, err := a.CreatePoc(draft)
+	switch {
+	case err == nil:
+		return "created", ""
+	case strings.Contains(err.Error(), "内容重复"):
+		return "skipped", "spec 内容重复，已存在"
+	default:
+		return "failed", err.Error()
+	}
 }
 
 // UpdatePocSpec 更新内容体：template 过三关校验；script 仅限空与大小（不做 PWF 校验）。

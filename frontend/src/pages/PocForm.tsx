@@ -3,10 +3,10 @@ import CodeMirror from "@uiw/react-codemirror";
 import { yaml } from "@codemirror/lang-yaml";
 import {
   ClipboardPaste, PenLine, AlertTriangle, Save, Check,
-  Plus, Trash2, BookOpen, Copy, CheckCheck,
+  Plus, Trash2, BookOpen, Copy, CheckCheck, FolderOpen,
 } from "lucide-react";
 import { dump as yamlDump, load as yamlLoad } from "js-yaml";
-import { api, SEVERITIES, CATEGORIES, STATUSES, type Draft } from "../api";
+import { api, SEVERITIES, CATEGORIES, STATUSES, type Draft, type BatchImportResults } from "../api";
 import { useResolvedTheme } from "../theme";
 import type { Route } from "../App";
 
@@ -101,6 +101,7 @@ export default function PocForm({ mode, uid, onNav }: {
   const [busy, setBusy] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
+  const [importRes, setImportRes] = useState<BatchImportResults | null>(null);
 
   // 结构化规则状态
   const [transport, setTransport] = useState<"http" | "tcp">("http");
@@ -192,6 +193,21 @@ export default function PocForm({ mode, uid, onNav }: {
     }
   };
 
+  // 从目录批量导入：选目录 → 逐文件转换入库（独立成败，不中断整批）
+  const doImportDir = async () => {
+    setErr(""); setImportRes(null); setBusy(true);
+    try {
+      const dir = await api.pickImportDir();
+      if (!dir) return; // 用户取消
+      const res = await api.importTemplates(dir);
+      setImportRes(res);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const doSave = async () => {
     setErr(""); setBusy(true); setSaved(false);
     try {
@@ -262,10 +278,44 @@ export default function PocForm({ mode, uid, onNav }: {
             粘贴完整 Xray 或 Nuclei 模板 YAML（自动识别格式，上限 256KB），解析后进入下方表单确认入库。
           </p>
           <CodeMirror value={xrayText} onChange={setXrayText} extensions={[yaml()]} theme={cmTheme} height="320px" />
-          <button onClick={doConvert} disabled={busy || !xrayText.trim()}
-            className="h-8 rounded-lg bg-[var(--accent)] px-4 text-[13px] font-medium text-white transition-colors duration-150 hover:brightness-110 disabled:opacity-40">
-            解析预览
-          </button>
+          <div className="flex items-center gap-2">
+            <button onClick={doConvert} disabled={busy || !xrayText.trim()}
+              className="h-8 rounded-lg bg-[var(--accent)] px-4 text-[13px] font-medium text-white transition-colors duration-150 hover:brightness-110 disabled:opacity-40">
+              解析预览
+            </button>
+            <button onClick={doImportDir} disabled={busy}
+              className="flex h-8 items-center gap-1.5 rounded-lg border px-4 text-[13px] text-[var(--txt-dim)] transition-colors duration-150 hover:border-[var(--accent)] hover:text-[var(--accent)] disabled:opacity-40"
+              style={{ borderColor: "var(--line-strong)" }}>
+              <FolderOpen size={14} strokeWidth={1.9} /> 从目录批量导入
+            </button>
+          </div>
+          {importRes && (
+            <div className="rounded-xl border p-4 text-[13px]" style={{ borderColor: "var(--line-strong)", background: "var(--bg-panel)" }}>
+              <div className="mb-2 font-medium">
+                批量导入完成：<span className="text-emerald-500">成功 {importRes.created}</span>
+                　<span className="text-[var(--txt-dim)]">重复跳过 {importRes.skipped}</span>
+                　<span className="text-red-400">失败 {importRes.failed}</span>
+              </div>
+              {importRes.details.length > 0 && (
+                <div className="max-h-48 space-y-0.5 overflow-auto">
+                  {importRes.details.map((d, i) => (
+                    <div key={i} className="flex items-baseline gap-2 text-xs">
+                      <span className={
+                        d.status === "created" ? "text-emerald-500" : d.status === "skipped" ? "text-[var(--txt-faint)]" : "text-red-400"
+                      }>
+                        {d.status === "created" ? "✓" : d.status === "skipped" ? "→" : "✗"}
+                      </span>
+                      <span className="font-mono-data text-[var(--txt-dim)]">{d.file}</span>
+                      {d.reason && <span className="truncate text-[var(--txt-faint)]">{d.reason}</span>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {importRes.created > 0 && (
+                <div className="mt-2 text-xs text-[var(--txt-dim)]">已入库 {importRes.created} 条，可到 PoC 库查看</div>
+              )}
+            </div>
+          )}
           {err && <ErrorBar text={err} />}
         </div>
       )}

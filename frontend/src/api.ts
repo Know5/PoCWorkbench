@@ -120,6 +120,14 @@ export interface DashboardData {
   totalTestRuns: number;
 }
 
+// 批量导入结果（ImportTemplates）
+export interface BatchImportResults {
+  created: number;
+  skipped: number;
+  failed: number;
+  details: { file: string; status: string; reason?: string }[];
+}
+
 async function call<T>(method: string, ...args: unknown[]): Promise<T> {
   const a = wailsApp();
   if (!a) throw new Error("后端尚未就绪（Wails 绑定未加载）");
@@ -133,6 +141,8 @@ export const api = {
   startupError: () => call<string>("StartupError"),
   convertXray: (yamlText: string) => call<Draft>("ConvertXray", yamlText),
   convertTemplate: (yamlText: string) => call<Draft>("ConvertTemplate", yamlText),
+  pickImportDir: () => call<string>("PickImportDir"),
+  importTemplates: (dir: string) => call<BatchImportResults>("ImportTemplates", dir),
   createPoc: (d: Draft) => call<string>("CreatePoc", d),
   updatePocSpec: (uid: string, specYaml: string) => call<void>("UpdatePocSpec", uid, specYaml),
   updatePocMeta: (uid: string, d: Draft) => call<void>("UpdatePocMeta", uid, d),

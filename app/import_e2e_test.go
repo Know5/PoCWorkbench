@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -192,5 +193,75 @@ expression: r0()
 		t.Error("含非法正则的模板应在保存时被拒绝")
 	} else if !strings.Contains(err.Error(), "正则") {
 		t.Errorf("错误应点明正则问题: %v", err)
+	}
+}
+
+// 批量导入：目录递归、三态结果（created/skipped/failed）、单文件失败不中断整批。
+func TestImportTemplatesBatch(t *testing.T) {
+	a := newApp(t)
+	root := t.TempDir()
+	// 子目录验证递归
+	sub := filepath.Join(root, "sub")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	xrayTmpl := `id: batch-1
+name: 批量导入一
+transport: http
+rules:
+  r:
+    request: {method: GET, path: /a}
+    expression: response.status == 200
+expression: r()
+`
+	files := map[string]string{
+		filepath.Join(root, "a.yaml"):   xrayTmpl,
+		filepath.Join(sub, "b.yml"):      xrayTmpl, // 与 a 相同 spec → skipped
+		filepath.Join(root, "bad.yaml"): "id: x\nname: 坏模板\nrules: [",  // YAML 损坏 → failed
+		filepath.Join(root, "skip.txt"):  "非模板文件不读",                    // 扩展名过滤
+	}
+	for p, c := range files {
+		if err := os.WriteFile(p, []byte(c), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	res, err := a.ImportTemplates(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Created != 1 || res.Skipped != 1 || res.Failed != 1 {
+		t.Fatalf("三态计数不符: created=%d skipped=%d failed=%d, details=%+v",
+			res.Created, res.Skipped, res.Failed, res.Details)
+	}
+	// 细节逐条对上
+	byFile := map[string]BatchImportEntry{}
+	for _, d := range res.Details {
+		byFile[d.File] = d
+	}
+	if e := byFile["a.yaml"]; e.Status != "created" {
+		t.Fatalf("a.yaml 应 created: %+v", e)
+	}
+	if e := byFile["sub/b.yml"]; e.Status != "skipped" || !strings.Contains(e.Reason, "重复") {
+		t.Fatalf("sub/b.yml 应 skipped(重复): %+v", e)
+	}
+	if e := byFile["bad.yaml"]; e.Status != "failed" {
+		t.Fatalf("bad.yaml 应 failed: %+v", e)
+	}
+	if _, ok := byFile["skip.txt"]; ok {
+		t.Fatal("非 yaml/yml 文件不应出现在结果里")
+	}
+}
+
+// 空目录与不存在的路径应有明确报错。
+func TestImportTemplatesBadDir(t *testing.T) {
+	a := newApp(t)
+	empty := t.TempDir()
+	if _, err := a.ImportTemplates(empty); err == nil || !strings.Contains(err.Error(), "没有") {
+		t.Fatalf("空目录应报错: %v", err)
+	}
+	if _, err := a.ImportTemplates(filepath.Join(empty, "nope")); err == nil {
+		t.Fatal("不存在目录应报错")
 	}
 }
