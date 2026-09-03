@@ -171,6 +171,19 @@ func XrayToDraft(xrayYAML string) (*model.Draft, error) {
 				rule.Request.ReadTimeout = rt
 			}
 		}
+		// PWF 原生 extract 字段直接透传（v1.2 串联）：本转换器也用于
+		// 已是 PWF 形态的文本（如导出件再导入），extract 不能丢。
+		if ex, ok := rmap["extract"].(map[string]any); ok && len(ex) > 0 {
+			rule.Extract = map[string]string{}
+			for vn, pv := range ex {
+				if pat := str(pv); pat != "" {
+					rule.Extract[vn] = pat
+				}
+			}
+			if len(rule.Extract) == 0 {
+				rule.Extract = nil
+			}
+		}
 		// search（v1.2 串联）：xray 用首个捕获组提取值 → PWF extract 变量。
 		// 命名 xray 原生引用形态 {{search}}；无捕获组 / 多组时降级警告（提取语义不明）。
 		if srch, ok := rmap["search"]; ok && hasContent(srch) {

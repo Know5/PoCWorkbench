@@ -252,3 +252,32 @@ expression: b1()
 		t.Fatalf("非法 set 应降级警告: %v", d3.Warnings)
 	}
 }
+
+// 回归：PWF 原生 extract 字段必须透传（曾因只映射 search/set 而丢失，
+// 导致"导出件再导入"的串联模板在保存时报未声明变量）。
+func TestXrayNativeExtractPassthrough(t *testing.T) {
+	src := `id: pwf-native
+name: 原生extract透传
+transport: http
+rules:
+  getid:
+    request: {method: GET, path: /list}
+    extract:
+      rid: '"id":"([0-9]+)"'
+    expression: response.status == 200
+  use:
+    request: {method: POST, path: "/exec?rid={{rid}}"}
+    expression: response.status == 200
+expression: getid() && use()
+`
+	d, err := XrayToDraft(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pwf.ValidateSpec(d.SpecYAML); err != nil {
+		t.Fatalf("原生 extract 透传后应过三关: %v\n%s", err, d.SpecYAML)
+	}
+	if !strings.Contains(d.SpecYAML, "rid:") {
+		t.Fatalf("产物应含 rid 声明:\n%s", d.SpecYAML)
+	}
+}
