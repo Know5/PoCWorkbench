@@ -176,3 +176,79 @@ http:
 		t.Fatal("未声明的 {{ghost}} path 残留应整体报错")
 	}
 }
+
+// xray set 两种形态（简写字符串 / regex+group 对象）都映射为 extract 变量，
+// 后续规则 {{Var}} 引用被放行且过三关校验；group>1 / 多捕获组降级跳过。
+func TestXraySetToExtract(t *testing.T) {
+	shorthand := `id: set-shorthand
+name: set简写形态
+transport: http
+rules:
+  s1:
+    request: {method: GET, path: /token}
+    set:
+      tk: '"token":"([0-9a-f]+)"'
+    expression: response.status == 200
+  s2:
+    request: {method: POST, path: /exec, body: "tk={{tk}}"}
+    expression: response.status == 200
+expression: s1() && s2()
+`
+	d, err := XrayToDraft(shorthand)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pwf.ValidateSpec(d.SpecYAML); err != nil {
+		t.Fatalf("简写 set 产物应过三关: %v\n%s", err, d.SpecYAML)
+	}
+	if !strings.Contains(d.SpecYAML, "tk:") {
+		t.Fatalf("产物应含 tk 变量:\n%s", d.SpecYAML)
+	}
+
+	objForm := `id: set-obj
+name: set对象形态
+transport: http
+rules:
+  o1:
+    request: {method: GET, path: /t}
+    set:
+      sid: {regex: "sid=([a-z]+)", group: 1}
+    expression: response.status == 200
+  o2:
+    request: {method: GET, path: "/use?sid={{sid}}"}
+    expression: response.status == 200
+expression: o1() && o2()
+`
+	d2, err := XrayToDraft(objForm)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pwf.ValidateSpec(d2.SpecYAML); err != nil {
+		t.Fatalf("对象 set 产物应过三关: %v\n%s", err, d2.SpecYAML)
+	}
+
+	badGroup := `id: set-bad
+name: set非法组
+transport: http
+rules:
+  b1:
+    request: {method: GET, path: /t}
+    set:
+      v: {regex: "(a)(b)", group: 2}
+    expression: response.status == 200
+expression: b1()
+`
+	d3, err := XrayToDraft(badGroup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range d3.Warnings {
+		if strings.Contains(w, "跳过") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("非法 set 应降级警告: %v", d3.Warnings)
+	}
+}

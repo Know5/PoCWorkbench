@@ -876,6 +876,34 @@ func (s *Store) GetPoc(uid string) (*model.Pwf, error) {
 	return build(spec, ""), nil
 }
 
+
+// SpecExists 按 canonical spec 哈希查重（dry-run 预览用，不落库）。
+func (s *Store) SpecExists(canonicalSpec string) (bool, error) {
+	var n int
+	hash := pwf.CanonicalHash(canonicalSpec)
+	err := s.db.QueryRow(`SELECT COUNT(1) FROM poc WHERE spec_sha256=?`, hash).Scan(&n)
+	return n > 0, err
+}
+
+// 单批上限 2000：与批量导入对称，防误传巨型列表。
+func (s *Store) GetPocsByUIDs(uids []string) ([]*model.Pwf, error) {
+	if len(uids) == 0 {
+		return nil, nil
+	}
+	if len(uids) > 2000 {
+		uids = uids[:2000]
+	}
+	out := make([]*model.Pwf, 0, len(uids))
+	for _, uid := range uids {
+		p, err := s.GetPoc(uid)
+		if err != nil {
+			continue // 单条失败跳过：批量导出不因个别坏记录中断
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}
+
 // KindOf 返回 PoC 的 spec_kind（template|script），供更新前分流校验。
 func (s *Store) KindOf(uid string) (string, error) {
 	var k string

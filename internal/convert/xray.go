@@ -192,6 +192,51 @@ func XrayToDraft(xrayYAML string) (*model.Draft, error) {
 					fmt.Sprintf("rule %s 的 search 无捕获组（xray 语义为布尔匹配面），请改写为 expression 中的 bmatches", rname))
 			}
 		}
+		// set（v1.2 串联）：xray 用 set 声明响应提取变量，形态二选一：
+		//   set: {Var: "正则（1 组）"}           → PWF extract: {Var: 正则}
+		//   set: {Var: {regex: "...", group: 1}} → 同上（group 必须为 1）
+		// 后续请求里 {{Var}} 引用（xray 原生引用形态即如此）。
+		if sets, ok := rmap["set"].(map[string]any); ok && len(sets) > 0 {
+			if rule.Extract == nil {
+				rule.Extract = map[string]string{}
+			}
+			for vn, sv := range sets {
+				pattern, group := "", 1
+				switch t := sv.(type) {
+				case string:
+					pattern = t
+				case map[string]any:
+					pattern = str(t["regex"])
+					if g := intOf(t["group"]); g > 0 {
+						group = g
+					}
+				}
+				switch {
+				case pattern == "":
+					draft.Warnings = append(draft.Warnings,
+						fmt.Sprintf("rule %s 的 set 变量 %s 缺少正则，已跳过", rname, vn))
+				default:
+					re, cerr := regexp.Compile(pattern)
+					switch {
+					case cerr != nil:
+						draft.Warnings = append(draft.Warnings,
+							fmt.Sprintf("rule %s 的 set 变量 %s 正则无法编译，已跳过: %v", rname, vn, cerr))
+					case re.NumSubexp() != 1:
+						draft.Warnings = append(draft.Warnings,
+							fmt.Sprintf("rule %s 的 set 变量 %s 正则须恰好 1 个捕获组（当前 %d），已跳过",
+								rname, vn, re.NumSubexp()))
+					case group != 1:
+						draft.Warnings = append(draft.Warnings,
+							fmt.Sprintf("rule %s 的 set 变量 %s 引用第 %d 捕获组，PWF 仅支持首组，已跳过", rname, vn, group))
+					default:
+						rule.Extract[vn] = pattern
+					}
+				}
+			}
+			if len(rule.Extract) == 0 {
+				rule.Extract = nil // 全部跳过时不留空 map
+			}
+		}
 		rule.Expression = str(rmap["expression"])
 		spec.Rules[rname] = rule
 	}
@@ -280,8 +325,8 @@ func checkUnsupportedDepth(node any, path string, draft *model.Draft, depth int)
 		return
 	}
 	unsupportedKeys := map[string]bool{
-		// search 自 v1.2 起转换为 extract 变量（见 rule 循环），不再是丢弃项
-		"set": true, "output": true, "needreverse": true,
+		// search / set 自 v1.2 起转换为 extract 变量（见 rule 循环），不再是丢弃项
+		"output": true, "needreverse": true,
 		"cache": true, "follow_redirects": true, "script": true,
 	}
 	switch v := node.(type) {

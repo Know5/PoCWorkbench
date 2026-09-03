@@ -225,10 +225,21 @@ type BatchImportEntry struct {
 	Reason string `json:"reason,omitempty"` // skipped/failed 的原因
 }
 
+// ImportTemplatesPreview 批量导入 dry-run 预览：走与正式导入完全相同的
+// 遍历/转换/三关校验/spec 查重，但不落库。前端确认后才调 ImportTemplates。
+func (a *App) ImportTemplatesPreview(dir string) (*BatchImportResults, error) {
+	return a.importTemplates(dir, true)
+}
+
 // ImportTemplates 批量导入目录下的模板文件（.yaml/.yml，递归）。
 // 每文件独立处理：转换失败/校验失败/spec 重复只记录该文件，不中断整批。
 // 上限：单文件 256KB（与粘贴一致）、单批 2000 文件（防误选超大目录拖死 UI）。
 func (a *App) ImportTemplates(dir string) (*BatchImportResults, error) {
+	return a.importTemplates(dir, false)
+}
+
+// importTemplates 公共实现：dryRun=true 只转换/校验/查重不落库。
+func (a *App) importTemplates(dir string, dryRun bool) (*BatchImportResults, error) {
 	if err := a.requireStore(); err != nil {
 		return nil, err
 	}
@@ -274,7 +285,7 @@ func (a *App) ImportTemplates(dir string) (*BatchImportResults, error) {
 		case len(data) > 256<<10:
 			entry.Status, entry.Reason = "failed", "超过 256KB 上限"
 		default:
-			entry.Status, entry.Reason = a.importOne(string(data))
+			entry.Status, entry.Reason = a.importOne(string(data), dryRun)
 		}
 		switch entry.Status {
 		case "created":
@@ -288,9 +299,9 @@ func (a *App) ImportTemplates(dir string) (*BatchImportResults, error) {
 	}
 	return res, nil
 }
-
-// importOne 转换并入库单个模板；返回 (status, reason)。
-func (a *App) importOne(yamlText string) (string, string) {
+// importOne 转换并（可选）入库单个模板；返回 (status, reason)。
+// dryRun=true：转换 + 三关校验 + spec 查重，绝不写库。
+func (a *App) importOne(yamlText string, dryRun bool) (string, string) {
 	var draft *model.Draft
 	switch convert.DetectFormat(yamlText) {
 	case convert.FormatXray:
@@ -307,6 +318,20 @@ func (a *App) importOne(yamlText string) (string, string) {
 		draft = d
 	default:
 		return "failed", "无法识别模板格式（支持 Xray 与 Nuclei）"
+	}
+	if dryRun {
+		canonical, err := pwf.ValidateSpec(draft.SpecYAML)
+		if err != nil {
+			return "failed", err.Error()
+		}
+		exists, err := a.store.SpecExists(canonical)
+		if err != nil {
+			return "failed", "查重失败: " + err.Error()
+		}
+		if exists {
+			return "skipped", "spec 内容重复，已存在"
+		}
+		return "created", ""
 	}
 	_, err := a.CreatePoc(draft)
 	switch {
@@ -588,6 +613,66 @@ func (a *App) ExportPoc(uid string) (string, error) {
 		return "", err
 	}
 	return string(out), nil
+}
+
+// PickExportFile 弹出系统保存框选择导出文件；取消返回空串。
+func (a *App) PickExportFile(defaultName string) (string, error) {
+	if a.ctx == nil {
+		return "", fmt.Errorf("应用尚未初始化完成")
+	}
+	return runtime.SaveFileDialog(a.ctx, runtime.SaveDialogOptions{
+		Title:           "导出 PoC（合并 YAML）",
+		DefaultFilename: defaultName,
+		Filters: []runtime.FileFilter{
+			{DisplayName: "PWF YAML (*.yaml)", Pattern: "*.yaml"},
+		},
+	})
+}
+
+// ExportPocs 批量导出：按 uid 列表合并为单个 YAML（--- 分隔）写入 destPath。
+// script 与 template 混排也正确：每条独立序列化；单条失败跳过不中断。
+func (a *App) ExportPocs(uids []string, destPath string) (int, error) {
+	if err := a.requireStore(); err != nil {
+		return 0, err
+	}
+	if len(uids) == 0 {
+		return 0, fmt.Errorf("未选择任何 PoC")
+	}
+	if strings.TrimSpace(destPath) == "" {
+		return 0, fmt.Errorf("未选择保存路径")
+	}
+	ps, err := a.store.GetPocsByUIDs(uids)
+	if err != nil {
+		return 0, err
+	}
+	if len(ps) == 0 {
+		return 0, fmt.Errorf("所选 PoC 均不存在")
+	}
+	var b strings.Builder
+	for _, p := range ps {
+		var out []byte
+		var merr error
+		if p.Metadata.Kind == "script" {
+			out, merr = yml.Marshal(struct {
+				Metadata *model.Metadata `yaml:"metadata"`
+				Script   string          `yaml:"script"`
+			}{&p.Metadata, p.SpecRaw})
+		} else {
+			out, merr = yml.Marshal(p)
+		}
+		if merr != nil {
+			continue
+		}
+		b.WriteString("---\n")
+		b.Write(out)
+	}
+	if b.Len() == 0 {
+		return 0, fmt.Errorf("序列化全部失败")
+	}
+	if err := os.WriteFile(destPath, []byte(b.String()), 0o644); err != nil {
+		return 0, fmt.Errorf("写文件失败: %w", err)
+	}
+	return len(ps), nil
 }
 
 // ---- 统计与维护 ----
