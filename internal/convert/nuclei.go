@@ -75,6 +75,20 @@ var nucleiIDPatterns = []*regexp.Regexp{
 var pathVarRe = regexp.MustCompile(`\{\{\s*(BaseURL|RootURL|Hostname)\s*\}\}(:\{\{\s*Port\s*\}\})?`)
 var leftoverVarRe = regexp.MustCompile(`\{\{[^{}]*\}\}`)
 
+// extractVarRe 提取模板变量名（Nuclei {{var}} 语法）。
+var extractVarRe = regexp.MustCompile(`\{\{\s*([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}`)
+
+// checkChainedVars 返回文本中未被声明为串联变量的 {{var}} 残留（空切片 = 全部放行）。
+func checkChainedVars(text string, chained map[string]bool) []string {
+	var out []string
+	for _, m := range extractVarRe.FindAllStringSubmatch(text, -1) {
+		if !chained[m[1]] {
+			out = append(out, m[0])
+		}
+	}
+	return out
+}
+
 // NucleiToDraft 把 Nuclei 模板转换为 PWF 草稿。尽力转换，失败细节进 Warnings。
 func NucleiToDraft(src string) (*model.Draft, error) {
 	if d := yamlDepthHint(src); d > maxScanNesting {
@@ -155,6 +169,36 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 	var order []string // 规则名顺序（map 无序，最终表达式拼接必须稳定）
 	hostHeaderDropped := false
 
+	// chainedVars 收集全模板 extractors 产出的变量名——path/body 中的 {{var}}
+	// 若属此集合，则按 PWF 串联语义放行（保存期由 validateExtracts 验证引用闭环）。
+	chainedVars := map[string]bool{}
+	collectChain := func(v any) {
+		list, ok := v.([]any)
+		if !ok {
+			return
+		}
+		for _, item := range list {
+			em, ok := item.(map[string]any)
+			if !ok {
+				continue
+			}
+			if strings.ToLower(str(em["type"])) == "regex" && !isTruthy(em["internal"]) {
+				if n := str(em["name"]); n != "" {
+					chainedVars[n] = true
+				}
+			}
+		}
+	}
+	for _, block := range []any{root["http"], root["tcp"], root["network"]} {
+		if bl, ok := block.([]any); ok {
+			for _, item := range bl {
+				if rm, ok := item.(map[string]any); ok {
+					collectChain(rm["extractors"])
+				}
+			}
+		}
+	}
+
 	// addRule 登记一条规则。matchers-condition 只在 buildMatcherExpr 内部生效
 	// （nuclei 语义：它合并单请求内的 matchers），绝不外溢到规则间的总表达式——
 	// 一个 http 块里的多个 path/raw 是彼此独立的请求，nuclei 判定为任一命中即命中。
@@ -199,8 +243,8 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 				continue
 			}
 			path = stripPathVars(path, draft)
-			if leftover := leftoverVarRe.FindAllString(path, -1); len(leftover) > 0 {
-				return nil, fmt.Errorf("%s 路径含不受支持的模板变量 %v（payload/变量类特性无法静态执行）", sub, leftover)
+			if leftover := checkChainedVars(path, chainedVars); len(leftover) > 0 {
+				return nil, fmt.Errorf("%s 路径含不受支持的模板变量 %v（仅 extractors 声明的变量可串联引用）", sub, leftover)
 			}
 			bodyVars := leftoverVarRe.FindAllString(body, -1)
 			if len(bodyVars) > 0 {
@@ -212,6 +256,7 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			}
 			addRule(model.Rule{
 				Request: model.Request{Method: method, Path: ensureAbsPath(path), Headers: headers, Body: body},
+				Extract: extractorsToMap(sub, reqMap["extractors"], draft),
 			}, expr, sub)
 		}
 
@@ -222,8 +267,8 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			if p == "" && str(pv) == "" {
 				continue
 			}
-			if leftover := leftoverVarRe.FindAllString(p, -1); len(leftover) > 0 {
-				return nil, fmt.Errorf("%s 路径含不受支持的模板变量 %v（payload/变量类特性无法静态执行）", sub, leftover)
+			if leftover := checkChainedVars(p, chainedVars); len(leftover) > 0 {
+				return nil, fmt.Errorf("%s 路径含不受支持的模板变量 %v（仅 extractors 声明的变量可串联引用）", sub, leftover)
 			}
 			method := strings.ToUpper(orDefault(str(reqMap["method"]), "GET"))
 			hs := headerMap(reqMap["headers"])
@@ -234,6 +279,7 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			}
 			addRule(model.Rule{
 				Request: model.Request{Method: method, Path: ensureAbsPath(p), Headers: hs, Body: body},
+				Extract: extractorsToMap(sub, reqMap["extractors"], draft),
 			}, expr, sub)
 		}
 	}
@@ -265,6 +311,7 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			if rt := intOf(reqMap["read-timeout"]); rt > 0 {
 				rule.Request.ReadTimeout = rt
 			}
+			rule.Extract = extractorsToMap(label, reqMap["extractors"], draft)
 			expr, err := convertReqMatchers(reqMap, "raw", label)
 			if err != nil {
 				return nil, err
@@ -743,7 +790,7 @@ func parseRawHTTP(raw string, hostDropped *bool) (method, path string, headers m
 // checkNucleiUnsupported 明示 Nuclei 特有且被丢弃的顶层特性。
 func checkNucleiUnsupported(root map[string]any, draft *model.Draft) {
 	var dropped []string
-	for _, k := range []string{"variables", "payloads", "attack", "stop-at-first-match", "req-condition", "extractors"} {
+	for _, k := range []string{"variables", "payloads", "attack", "stop-at-first-match", "req-condition"} {
 		if v, ok := root[k]; ok && hasContent(v) {
 			dropped = append(dropped, k)
 		}
@@ -751,4 +798,85 @@ func checkNucleiUnsupported(root map[string]any, draft *model.Draft) {
 	if len(dropped) > 0 {
 		draft.Warnings = append(draft.Warnings, fmt.Sprintf("不支持且已丢弃的 Nuclei 特性: %s", strings.Join(dropped, ", ")))
 	}
+}
+
+// extractorsToMap 把请求级 extractors 转为 PWF extract 声明（v1.2 串联）。
+// regex 型（默认 group 1）→ 变量名取 name（无则 ex_<正则前缀哈希>）；
+// internal 提取器（不产出后续可引用变量）跳过并注明；其他类型降级警告。
+// 返回 nil 表示无可用提取器（不设置 Extract 字段，零影响旧模板）。
+func extractorsToMap(label string, v any, draft *model.Draft) map[string]string {
+	list, ok := v.([]any)
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	out := map[string]string{}
+	for i, item := range list {
+		em, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		kind := strings.ToLower(str(em["type"]))
+		if isTruthy(em["internal"]) {
+			draft.Warnings = append(draft.Warnings,
+				fmt.Sprintf("%s extractors[%d] 为 internal（仅模板内部使用），已跳过", label, i))
+			continue
+		}
+		switch kind {
+		case "regex":
+			// nuclei 的 regex 字段可为字符串或数组（数组=逐个尝试，取首个可编译的）
+			pattern := str(em["regex"])
+			if pattern == "" {
+				if arr, aok := em["regex"].([]any); aok && len(arr) > 0 {
+					pattern = str(arr[0])
+				}
+			}
+			if pattern == "" {
+				continue
+			}
+			group := intOf(em["group"])
+			if group <= 0 {
+				group = 1
+			}
+			re, cerr := regexp.Compile(pattern)
+			if cerr != nil {
+				draft.Warnings = append(draft.Warnings,
+					fmt.Sprintf("%s extractors[%d] 正则无法编译，已跳过: %v", label, i, cerr))
+				continue
+			}
+			if group > re.NumSubexp() {
+				draft.Warnings = append(draft.Warnings,
+					fmt.Sprintf("%s extractors[%d] 的 group %d 超出捕获组数 %d，已跳过", label, i, group, re.NumSubexp()))
+				continue
+			}
+			// PWF extract 语义 = 恰好 1 个捕获组取值。nuclei 允许 group>1，
+			// 静态改造组序不可靠（语义保真优先于覆盖率，绝不静默错配）→ 仅 group==1 直译，其余降级。
+			if group != 1 {
+				draft.Warnings = append(draft.Warnings,
+					fmt.Sprintf("%s extractors[%d] 引用第 %d 捕获组，PWF 仅支持首组，需人工改写正则", label, i, group))
+				continue
+			}
+			if re.NumSubexp() != 1 {
+				draft.Warnings = append(draft.Warnings,
+					fmt.Sprintf("%s extractors[%d] 正则含 %d 个捕获组（PWF extract 须恰好 1 个），需人工改写", label, i, re.NumSubexp()))
+				continue
+			}
+			name := str(em["name"])
+			if name == "" {
+				name = fmt.Sprintf("ex_%d", i)
+			}
+			if _, dup := out[name]; dup {
+				draft.Warnings = append(draft.Warnings,
+					fmt.Sprintf("%s extractors[%d] 变量名 %s 重复，已跳过", label, i, name))
+				continue
+			}
+			out[name] = pattern
+		default:
+			draft.Warnings = append(draft.Warnings,
+				fmt.Sprintf("%s extractors[%d] 为 %s 型提取器，PWF 暂不支持（可用 regex 型），已跳过", label, i, kind))
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }

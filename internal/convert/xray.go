@@ -171,6 +171,27 @@ func XrayToDraft(xrayYAML string) (*model.Draft, error) {
 				rule.Request.ReadTimeout = rt
 			}
 		}
+		// search（v1.2 串联）：xray 用首个捕获组提取值 → PWF extract 变量。
+		// 命名 xray 原生引用形态 {{search}}；无捕获组 / 多组时降级警告（提取语义不明）。
+		if srch, ok := rmap["search"]; ok && hasContent(srch) {
+			pattern := str(srch)
+			if re, cerr := regexp.Compile(pattern); cerr == nil && re.NumSubexp() >= 1 {
+				if re.NumSubexp() == 1 {
+					if rule.Extract == nil {
+						rule.Extract = map[string]string{}
+					}
+					rule.Extract["search"] = pattern
+				} else {
+					draft.Warnings = append(draft.Warnings,
+						fmt.Sprintf("rule %s 的 search 含 %d 个捕获组（PWF extract 仅支持 1 个），已降级为匹配面不提取", rname, re.NumSubexp()))
+				}
+			} else if cerr != nil {
+				draft.Warnings = append(draft.Warnings, fmt.Sprintf("rule %s 的 search 正则无法编译，已丢弃: %v", rname, cerr))
+			} else {
+				draft.Warnings = append(draft.Warnings,
+					fmt.Sprintf("rule %s 的 search 无捕获组（xray 语义为布尔匹配面），请改写为 expression 中的 bmatches", rname))
+			}
+		}
 		rule.Expression = str(rmap["expression"])
 		spec.Rules[rname] = rule
 	}
@@ -259,7 +280,8 @@ func checkUnsupportedDepth(node any, path string, draft *model.Draft, depth int)
 		return
 	}
 	unsupportedKeys := map[string]bool{
-		"set": true, "output": true, "needreverse": true, "search": true,
+		// search 自 v1.2 起转换为 extract 变量（见 rule 循环），不再是丢弃项
+		"set": true, "output": true, "needreverse": true,
 		"cache": true, "follow_redirects": true, "script": true,
 	}
 	switch v := node.(type) {
