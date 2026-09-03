@@ -72,6 +72,7 @@ export interface RuleDef {
     body?: string; inputs?: { data: string }[]; readTimeout?: number;
   };
   expression: string;
+  extract?: Record<string, string>; // v1.2 串联：变量名 → 含 1 个捕获组的正则
 }
 
 export interface PwfSpec {

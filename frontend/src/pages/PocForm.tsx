@@ -22,6 +22,8 @@ interface RuleUI {
   inputs: string[];
   readTimeout: number;
   expression: string;
+  // v1.2 串联：变量名 → 含 1 个捕获组的正则（空对象 = 无提取）
+  extract: Record<string, string>;
 }
 
 const blankRule = (transport: "http" | "tcp"): RuleUI => ({
@@ -31,6 +33,7 @@ const blankRule = (transport: "http" | "tcp"): RuleUI => ({
   expression: transport === "tcp"
     ? "response.raw.bcontains(b'')"
     : "response.status == 200",
+  extract: {},
 });
 
 const emptyDraft = (): Draft => ({
@@ -71,6 +74,15 @@ function loadSpecToUI(txt: string): {
       inputs: inputsArr.map((x) => asStr((x as Record<string, unknown>).data)),
       readTimeout: asNum(req.read_timeout) || asNum(req.readTimeout) || 3,
       expression: asStr(r.expression),
+      extract: (() => {
+        const ex = (r.extract ?? {}) as Record<string, unknown>;
+        const out: Record<string, string> = {};
+        for (const k of Object.keys(ex)) {
+          const v = asStr(ex[k]);
+          if (v !== "") out[k] = v;
+        }
+        return out;
+      })(),
     });
   }
   if (rules.length === 0) return null;
@@ -128,6 +140,7 @@ export default function PocForm({ mode, uid, onNav }: {
   const buildSpecYaml = (): string => {
     const rulesObj: Record<string, unknown> = {};
     rules.forEach((r, i) => {
+      let ruleObj: Record<string, unknown>;
       if (transport === "http") {
         const req: Record<string, unknown> = { method: r.method || "GET", path: r.path };
         const hs = r.headers.filter((h) => h.k.trim() !== "");
@@ -137,9 +150,9 @@ export default function PocForm({ mode, uid, onNav }: {
           req.headers = hmap;
         }
         if (r.body !== "") req.body = r.body;
-        rulesObj[`r${i}`] = { request: req, expression: r.expression };
+        ruleObj = { request: req, expression: r.expression };
       } else {
-        rulesObj[`r${i}`] = {
+        ruleObj = {
           request: {
             inputs: (r.inputs.length ? r.inputs : [""]).map((d) => ({ data: d })),
             read_timeout: r.readTimeout > 0 ? r.readTimeout : 3,
@@ -147,6 +160,11 @@ export default function PocForm({ mode, uid, onNav }: {
           expression: r.expression,
         };
       }
+      // extract 序列化：空对象不落键（保持旧模板产物零差异）
+      if (Object.keys(r.extract).length > 0) {
+        ruleObj.extract = r.extract;
+      }
+      rulesObj[`r${i}`] = ruleObj;
     });
     return yamlDump(
       { transport, rules: rulesObj, expression: finalExpr },
@@ -450,6 +468,72 @@ export default function PocForm({ mode, uid, onNav }: {
                           : "response.status == 200 && response.body.bcontains(b'root:')"}
                       />
                     </div>
+
+                    {/* v1.2 串联：变量提取编辑行（空则不渲染任何键，旧模板零差异） */}
+                    <div className="space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] font-medium text-[var(--txt-dim)]">
+                          变量提取（可选）—— 响应命中后取值，供后续规则引用
+                        </span>
+                        <button
+                          onClick={() => patchRule(i, {
+                            extract: { ...r.extract, ["var" + (Object.keys(r.extract).length + 1)]: "([0-9]+)" },
+                          })}
+                          className="flex h-6 items-center gap-1 rounded border px-1.5 text-[11px] text-[var(--txt-dim)] transition-colors duration-150 hover:border-[var(--accent)] hover:text-[var(--accent)]"
+                          style={{ borderColor: "var(--line-strong)" }}
+                          type="button"
+                        >
+                          <Plus size={12} /> 提取变量
+                        </button>
+                      </div>
+                      {Object.keys(r.extract).length > 0 && (
+                        <div className="grid grid-cols-[1fr_2fr_auto] gap-2">
+                          {Object.entries(r.extract).map(([vn, pat]) => (
+                            <div key={vn} className="contents">
+                              <input value={vn} placeholder="变量名"
+                                onChange={(e) => {
+                                  const next: Record<string, string> = {};
+                                  for (const [k, v] of Object.entries(r.extract)) {
+                                    next[k === vn ? e.target.value : k] = v;
+                                  }
+                                  patchRule(i, { extract: next });
+                                }}
+                                className={`${inputCls} !mt-0 font-mono-data`} style={borderStyle} />
+                              <input value={pat} placeholder="正则（须恰好 1 个捕获组）"
+                                onChange={(e) => patchRule(i, {
+                                  extract: { ...r.extract, [vn]: e.target.value },
+                                })}
+                                className={`${inputCls} !mt-0 font-mono-data`} style={borderStyle} />
+                              <button type="button"
+                                onClick={() => {
+                                  const next = { ...r.extract };
+                                  delete next[vn];
+                                  patchRule(i, { extract: next });
+                                }}
+                                className="flex w-7 items-center justify-center rounded-md text-[var(--txt-faint)] hover:bg-[var(--hover)] hover:text-[var(--danger)]">
+                                <Trash2 size={13} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {/* 快捷插入：全模板已声明的变量名（提取处产出 → 请求处引用） */}
+                      {(() => {
+                        const names = new Set<string>();
+                        rules.forEach((rr) => Object.keys(rr.extract).forEach((k) => names.add(k)));
+                        if (names.size === 0) return null;
+                        return (
+                          <div className="flex flex-wrap items-center gap-1.5 pt-0.5">
+                            <span className="text-[11px] text-[var(--txt-faint)]">插入变量引用：</span>
+                            {Array.from(names).map((n) => (
+                              <TokBtn key={n} onClick={() => patchRule(i, { path: r.path + `{{${n}}}` })}>
+                                {`{{${n}}}`}
+                              </TokBtn>
+                            ))}
+                          </div>
+                        );
+                      })()}
+                    </div>
                   </div>
                 ))}
 
@@ -617,6 +701,9 @@ function Cheatsheet() {
         　正则为 RE2 语法，反斜杠需双写：<code className="font-mono-data">bmatches('nginx/1\\.\\d+')</code>。
         　响应头匹配写作 <code className="font-mono-data">response.headers['server']</code>（键名小写）。
         　elapsed_ms 为该规则请求的网络耗时（毫秒），时间盲注用它做阈值判断。
+        　<b>串联验证</b>：规则卡「变量提取」声明 <code className="font-mono-data">变量名: 正则（恰好 1 个捕获组）</code>，
+        该规则命中后从响应取值；后续规则请求文本（path/headers/body）里写 <code className="font-mono-data">{'{{变量名}}'}</code> 引用，
+        引擎按依赖顺序自动串联执行（如先 GET 提取 id → POST 用 <code className="font-mono-data">{'{{id}}'}</code> 打命令注入）。
       </div>
     </div>
   );
