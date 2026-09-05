@@ -2,7 +2,7 @@
 
 桌面端 PoC 管理与验证工作台。把散落的 xray 模板、手写 PoC 收进一个带全文检索的本地库，用自研引擎对授权目标做安全验证——单文件 Windows 应用，开箱即用。
 
-> 当前版本：v1.2.2
+> 当前版本：v1.2.3
 
 ## 功能特性
 
@@ -30,7 +30,7 @@ rules:
 expression: base() && delay5()
 ```
 
-- **串联验证（v1.2）**：规则可声明变量提取（`extract: 变量名: 正则（恰好 1 个捕获组）`），命中后从响应取值，后续规则请求文本以 `{{变量名}}` 引用，引擎按依赖自动串联执行——先 GET 提取 id、再 POST 用 `{{id}}` 打命令注入的 jeecg 类漏洞不再需要写死。xray `search` 与 Nuclei `extractors`（regex 型）导入时自动映射为该能力
+- **串联验证（v1.2）**：规则可声明变量提取（`extract: 变量名: 正则（恰好 1 个捕获组）`），命中后从响应取值，后续规则请求文本以 `{{变量名}}` 引用，引擎按依赖自动串联执行——先 GET 提取 id、再 POST 用 `{{id}}` 打命令注入的 jeecg 类漏洞不再需要写死。xray `search`/`set` 与 Nuclei `extractors`（regex / kval / json 纯键路径型）导入时自动映射为该能力（xpath 需人工改写）
 
 - **代理支持**：HTTP transport 支持 http/https/socks5；TCP transport 支持 socks5 与 http CONNECT 隧道（挂 Burp 调试）；非法代理地址显式报错，绝不静默直连
 

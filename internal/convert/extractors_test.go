@@ -152,14 +152,9 @@ http:
 	if err != nil {
 		t.Fatal(err)
 	}
-	found := false
-	for _, w := range d.Warnings {
-		if strings.Contains(w, "kval") && strings.Contains(w, "跳过") {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("kval 提取器应有降级警告: %v", d.Warnings)
+	// v1.2.2 起 kval 映射为等价正则：应产出变量，不再是降级警告
+	if !strings.Contains(d.SpecYAML, "server") {
+		t.Fatalf("kval 应物化为 server 变量:\n%s", d.SpecYAML)
 	}
 
 	undeclared := `id: t2
@@ -279,5 +274,117 @@ expression: getid() && use()
 	}
 	if !strings.Contains(d.SpecYAML, "rid:") {
 		t.Fatalf("产物应含 rid 声明:\n%s", d.SpecYAML)
+	}
+}
+
+// kval 提取器 → 静态物化为 k=([^\s&"']+) 等价正则，串联引用过三关。
+func TestNucleiKvalExtractor(t *testing.T) {
+	src := `id: kval-chained
+info:
+  name: kval提取串联
+  severity: high
+http:
+  - path: ["{{BaseURL}}/session"]
+    extractors:
+      - type: kval
+        name: sid
+        kval:
+          - JSESSIONID
+    matchers:
+      - type: status
+        status: [200]
+  - path: ["{{BaseURL}}/admin?sid={{sid}}"]
+    matchers:
+      - type: word
+        words: ["admin"]
+`
+	d, err := NucleiToDraft(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(d.SpecYAML, "sid:") {
+		t.Fatalf("产物应含 sid 变量:\n%s", d.SpecYAML)
+	}
+	if _, err := pwf.ValidateSpec(d.SpecYAML); err != nil {
+		t.Fatalf("kval 物化应过三关: %v\n%s", err, d.SpecYAML)
+	}
+}
+
+// json 纯键路径 → 键序列正则；含数组下标的复杂路径降级警告。
+func TestNucleiJsonExtractor(t *testing.T) {
+	simple := `id: json-chained
+info:
+  name: json提取串联
+  severity: high
+http:
+  - path: ["{{BaseURL}}/api/token"]
+    extractors:
+      - type: json
+        name: tok
+        json:
+          - .data.token
+    matchers:
+      - type: status
+        status: [200]
+  - path: ["{{BaseURL}}/use?tok={{tok}}"]
+    matchers:
+      - type: status
+        status: [200]
+`
+	d, err := NucleiToDraft(simple)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pwf.ValidateSpec(d.SpecYAML); err != nil {
+		t.Fatalf("json 物化应过三关: %v\n%s", err, d.SpecYAML)
+	}
+
+	complexPath := `id: json-complex
+info:
+  name: 复杂路径
+  severity: info
+http:
+  - path: ["{{BaseURL}}/x"]
+    extractors:
+      - type: json
+        name: v
+        json:
+          - .items[0].id
+    matchers:
+      - type: status
+        status: [200]
+`
+	d2, err := NucleiToDraft(complexPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, w := range d2.Warnings {
+		if strings.Contains(w, "数组下标") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("复杂路径应降级警告: %v", d2.Warnings)
+	}
+}
+
+// xpath 提取器：整体报错拒绝（静默丢变量会打断串联链）。
+func TestNucleiXpathRejected(t *testing.T) {
+	src := `id: x
+info:
+  name: xpath
+  severity: info
+http:
+  - path: ["{{BaseURL}}/"]
+    extractors:
+      - type: xpath
+        xpath: /html/head/title
+    matchers:
+      - type: status
+        status: [200]
+`
+	if _, err := NucleiToDraft(src); err == nil {
+		t.Fatal("xpath 提取器应整体报错")
 	}
 }

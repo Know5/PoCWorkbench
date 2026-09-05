@@ -182,9 +182,32 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			if !ok {
 				continue
 			}
-			if strings.ToLower(str(em["type"])) == "regex" && !isTruthy(em["internal"]) {
-				if n := str(em["name"]); n != "" {
-					chainedVars[n] = true
+			switch strings.ToLower(str(em["type"])) {
+			case "regex", "kval", "json":
+				if !isTruthy(em["internal"]) {
+					if n := str(em["name"]); n != "" {
+						chainedVars[n] = true
+					} else {
+						switch strings.ToLower(str(em["type"])) {
+						case "kval":
+							if ks, ok := em["kval"].([]any); ok {
+								for _, kv := range ks {
+									if k := str(kv); k != "" {
+										chainedVars[k] = true
+									}
+								}
+							}
+						case "json":
+							if js, ok := em["json"].([]any); ok {
+								for _, jv := range js {
+									path := strings.TrimPrefix(str(jv), ".")
+									if path != "" && !strings.ContainsAny(path, "[]*|()") {
+										chainedVars[strings.ReplaceAll(path, ".", "_")] = true
+									}
+								}
+							}
+						}
+					}
 				}
 			}
 		}
@@ -254,9 +277,13 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			if err != nil {
 				return nil, err
 			}
+			exm, xerr := extractorsToMap(sub, reqMap["extractors"], draft)
+			if xerr != nil {
+				return nil, xerr
+			}
 			addRule(model.Rule{
 				Request: model.Request{Method: method, Path: ensureAbsPath(path), Headers: headers, Body: body},
-				Extract: extractorsToMap(sub, reqMap["extractors"], draft),
+				Extract: exm,
 			}, expr, sub)
 		}
 
@@ -277,9 +304,13 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			if err != nil {
 				return nil, err
 			}
+			exm, xerr := extractorsToMap(sub, reqMap["extractors"], draft)
+			if xerr != nil {
+				return nil, xerr
+			}
 			addRule(model.Rule{
 				Request: model.Request{Method: method, Path: ensureAbsPath(p), Headers: hs, Body: body},
-				Extract: extractorsToMap(sub, reqMap["extractors"], draft),
+				Extract: exm,
 			}, expr, sub)
 		}
 	}
@@ -311,7 +342,11 @@ func NucleiToDraft(src string) (*model.Draft, error) {
 			if rt := intOf(reqMap["read-timeout"]); rt > 0 {
 				rule.Request.ReadTimeout = rt
 			}
-			rule.Extract = extractorsToMap(label, reqMap["extractors"], draft)
+			exm, xerr := extractorsToMap(label, reqMap["extractors"], draft)
+			if xerr != nil {
+				return nil, xerr
+			}
+			rule.Extract = exm
 			expr, err := convertReqMatchers(reqMap, "raw", label)
 			if err != nil {
 				return nil, err
@@ -804,10 +839,10 @@ func checkNucleiUnsupported(root map[string]any, draft *model.Draft) {
 // regex 型（默认 group 1）→ 变量名取 name（无则 ex_<正则前缀哈希>）；
 // internal 提取器（不产出后续可引用变量）跳过并注明；其他类型降级警告。
 // 返回 nil 表示无可用提取器（不设置 Extract 字段，零影响旧模板）。
-func extractorsToMap(label string, v any, draft *model.Draft) map[string]string {
+func extractorsToMap(label string, v any, draft *model.Draft) (map[string]string, error) {
 	list, ok := v.([]any)
 	if !ok || len(list) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := map[string]string{}
 	for i, item := range list {
@@ -870,13 +905,96 @@ func extractorsToMap(label string, v any, draft *model.Draft) map[string]string 
 				continue
 			}
 			out[name] = pattern
+		case "kval":
+			// kval: 从 key=value 形态取值（响应头/Cookie/查询串均呈此形态）。
+			// 静态物化为等价正则：k=([^{\s&"']+)]——与 nuclei 的取值语义等价，
+			// 引擎零改动。值形态正则只到空白/引号/& 为止，覆盖 CTF 与实战响应的绝大多数。
+			ks, _ := em["kval"].([]any)
+			for _, kv := range ks {
+				k := str(kv)
+				if k == "" {
+					continue
+				}
+				pat := regexp.QuoteMeta(k) + `["']?\s*[:=]\s*["']?([^"'\s&}{]+)`
+				if err := aputVar(out, draft, label, i, varNameOf(em, k), pat); err != nil {
+					draft.Warnings = append(draft.Warnings, err.Error())
+				}
+			}
+		case "json":
+			// json: JQ 点路径取值。静态物化为键序列正则（仅支持纯键路径）。
+			// 含数组下标 / 通配 / 管道的路径 JQ 语义复杂，降级警告。
+			js, _ := em["json"].([]any)
+			for _, jv := range js {
+				path := strings.TrimPrefix(str(jv), ".")
+				if path == "" {
+					continue
+				}
+				segs := strings.Split(path, ".")
+				complexPath := false
+				for _, s := range segs {
+					if s == "" || strings.ContainsAny(s, "[]*|()") {
+						complexPath = true
+						break
+					}
+				}
+				if complexPath {
+					draft.Warnings = append(draft.Warnings,
+						fmt.Sprintf("%s extractors[%d] json 路径 %q 含数组下标/通配/管道，PWF 无法静态物化，需人工改写", label, i, path))
+					continue
+				}
+				var b strings.Builder
+				for _, s := range segs {
+					b.WriteString(`"` + regexp.QuoteMeta(s) + `"\s*:\s*`)
+				}
+				pat := b.String() + `"?([^",}\s]+)"?`
+				if err := aputVar(out, draft, label, i, varNameOf(em, strings.ReplaceAll(path, ".", "_")), pat); err != nil {
+					draft.Warnings = append(draft.Warnings, err.Error())
+				}
+			}
+		case "xpath":
+			// xpath 需要 HTML 解析器语义（属性轴/谓词），正则物化不可靠。
+			// 静默丢变量会把串联链变成误导性请求 → 整体报错拒绝（extractorsToMap 返回 nil
+			// 会被上层当"无提取器"，违背绝不静默；改由返回未登记的占位错误经 out 传播）。
+			// 实现：把错误塞进 out 后立即标记 abort，由调用方展开为完整失败。
+			return nil, xpathAbort(label, i)
 		default:
 			draft.Warnings = append(draft.Warnings,
 				fmt.Sprintf("%s extractors[%d] 为 %s 型提取器，PWF 暂不支持（可用 regex 型），已跳过", label, i, kind))
 		}
 	}
 	if len(out) == 0 {
-		return nil
+		return nil, nil
 	}
-	return out
+	return out, nil
+}
+
+// xpathAbort 构造 xpath 提取器的拒绝错误。
+func xpathAbort(label string, i int) error {
+	return fmt.Errorf("%s extractors[%d] 为 xpath 型（HTML 结构取值），无法静态转换；请人工改写为 regex 型 extract", label, i)
+}
+
+// varNameOf 提取器变量名：name 优先，缺省用 fallback。
+func varNameOf(em map[string]any, fallback string) string {
+	if n := str(em["name"]); n != "" {
+		return n
+	}
+	return fallback
+}
+
+// aputVar 往 out 里登记提取器变量；重复名报错（调用方追加到警告）。
+func aputVar(out map[string]string, draft *model.Draft, label string, i int, name, pattern string) error {
+	if _, dup := out[name]; dup {
+		return fmt.Errorf("%s extractors[%d] 变量名 %s 重复，已跳过", label, i, name)
+	}
+	if _, taken := draftReservedVar(name); taken {
+		return fmt.Errorf("%s extractors[%d] 变量名 %s 与同名变量冲突，已跳过", label, i, name)
+	}
+	out[name] = pattern
+	return nil
+}
+
+// draftReservedVar 占位：变量名集合内一致性校验（保留字扩展点）。
+// 当前无保留变量名；返回空 map 使调用方永不冲突。
+func draftReservedVar(name string) (struct{}, bool) {
+	return struct{}{}, false
 }
